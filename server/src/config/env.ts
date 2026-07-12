@@ -33,4 +33,32 @@ export const env = {
   GARMIN_CLIENT_SECRET: process.env.GARMIN_CLIENT_SECRET || '',
 };
 
-export const OAUTH_CALLBACK = env.OAUTH_REDIRECT_URI || `${env.APP_URL}/api/integrations/oauth/callback`;
+export const OAUTH_CALLBACK = env.OAUTH_REDIRECT_URI || `${env.APP_URL.replace(/\/$/, '')}/api/integrations/oauth/callback`;
+
+/** Resolve API + OAuth callback URLs from where the user opened the app (e.g. phone on Tailscale). */
+export function resolveOAuthUrls(clientUrl?: string) {
+  const fallbackClient = env.CLIENT_URL.replace(/\/$/, '');
+  const fallbackApp = env.APP_URL.replace(/\/$/, '');
+  const fallbackRedirect = env.OAUTH_REDIRECT_URI || `${fallbackApp}/api/integrations/oauth/callback`;
+
+  if (!clientUrl) {
+    return { clientUrl: fallbackClient, appUrl: fallbackApp, redirectUri: fallbackRedirect };
+  }
+
+  try {
+    const client = new URL(clientUrl);
+    if (!['http:', 'https:'].includes(client.protocol)) {
+      throw new Error('invalid protocol');
+    }
+    const apiPort = env.PORT || '3001';
+    const appUrl = `${client.protocol}//${client.hostname}:${apiPort}`;
+    const redirectUri = env.OAUTH_REDIRECT_URI || `${appUrl}/api/integrations/oauth/callback`;
+    return {
+      clientUrl: client.origin,
+      appUrl,
+      redirectUri,
+    };
+  } catch {
+    return { clientUrl: fallbackClient, appUrl: fallbackApp, redirectUri: fallbackRedirect };
+  }
+}

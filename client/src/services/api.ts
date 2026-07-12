@@ -100,8 +100,14 @@ export const api = {
 
   integrations: {
     list: () => request<unknown[]>('/integrations'),
-    getProviders: () => request<{ providers: Record<string, unknown>; oauthAvailable: Record<string, boolean>; oauthCallbackUrl: string }>('/integrations/providers'),
-    connect: (provider: string) => request<{ url: string }>(`/integrations/${provider}/connect`),
+    getProviders: (clientUrl?: string) => {
+      const qs = clientUrl ? `?client_url=${encodeURIComponent(clientUrl)}` : '';
+      return request<{ providers: Record<string, unknown>; oauthAvailable: Record<string, boolean>; oauthCallbackUrl: string }>(`/integrations/providers${qs}`);
+    },
+    connect: (provider: string, clientUrl?: string) => {
+      const qs = clientUrl ? `?client_url=${encodeURIComponent(clientUrl)}` : '';
+      return request<{ url: string; redirectUri?: string }>(`/integrations/${provider}/connect${qs}`);
+    },
     configure: (provider: string, data: Record<string, unknown>) =>
       request(`/integrations/${provider}/configure`, { method: 'POST', body: JSON.stringify(data) }),
     sync: (provider: string, options?: { fullHistory?: boolean; days?: number }) =>

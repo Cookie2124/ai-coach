@@ -1,9 +1,16 @@
 import jwt from 'jsonwebtoken';
 import crypto from 'crypto';
-import { env, OAUTH_CALLBACK } from '../../config/env.js';
+import { env, OAUTH_CALLBACK, resolveOAuthUrls } from '../../config/env.js';
+
+export interface OAuthContext {
+  userId: string;
+  provider: string;
+  redirectUri: string;
+  clientUrl: string;
+}
 
 /** WHOOP requires state to be 8 characters when self-generated */
-const pendingOAuthStates = new Map<string, { userId: string; provider: string; expires: number }>();
+const pendingOAuthStates = new Map<string, OAuthContext & { expires: number }>();
 
 function pruneExpiredStates() {
   const now = Date.now();
@@ -12,22 +19,27 @@ function pruneExpiredStates() {
   }
 }
 
-function createWhoopState(userId: string, provider: string): string {
+function createWhoopState(ctx: OAuthContext): string {
   pruneExpiredStates();
   let state = crypto.randomBytes(4).toString('hex');
   while (pendingOAuthStates.has(state)) {
     state = crypto.randomBytes(4).toString('hex');
   }
-  pendingOAuthStates.set(state, { userId, provider, expires: Date.now() + 10 * 60 * 1000 });
+  pendingOAuthStates.set(state, { ...ctx, expires: Date.now() + 10 * 60 * 1000 });
   return state;
 }
 
-function verifyWhoopState(state: string): { userId: string; provider: string } {
+function verifyWhoopState(state: string): OAuthContext {
   pruneExpiredStates();
   const entry = pendingOAuthStates.get(state);
   if (!entry) throw new Error('Invalid or expired OAuth state');
   pendingOAuthStates.delete(state);
-  return { userId: entry.userId, provider: entry.provider };
+  return {
+    userId: entry.userId,
+    provider: entry.provider,
+    redirectUri: entry.redirectUri,
+    clientUrl: entry.clientUrl,
+  };
 }
 
 export interface OAuthProviderConfig {
@@ -125,29 +137,44 @@ export function isOAuthAvailable(provider: string): boolean {
   return !!(config?.clientId && config?.clientSecret);
 }
 
-export function createOAuthState(userId: string, provider: string): string {
-  return jwt.sign({ userId, provider, type: 'oauth' }, env.JWT_SECRET, { expiresIn: '10m' });
+function createJwtState(ctx: OAuthContext): string {
+  return jwt.sign(
+    { ...ctx, type: 'oauth' },
+    env.JWT_SECRET,
+    { expiresIn: '10m' },
+  );
 }
 
-export function verifyOAuthState(state: string): { userId: string; provider: string } {
+export function verifyOAuthState(state: string): OAuthContext {
   if (/^[a-f0-9]{8}$/.test(state)) {
     return verifyWhoopState(state);
   }
-  const payload = jwt.verify(state, env.JWT_SECRET) as { userId: string; provider: string; type: string };
+  const payload = jwt.verify(state, env.JWT_SECRET) as OAuthContext & { type: string };
   if (payload.type !== 'oauth') throw new Error('Invalid OAuth state');
-  return { userId: payload.userId, provider: payload.provider };
+  return {
+    userId: payload.userId,
+    provider: payload.provider,
+    redirectUri: payload.redirectUri || OAUTH_CALLBACK,
+    clientUrl: payload.clientUrl || env.CLIENT_URL,
+  };
 }
 
-export function getAuthorizationUrl(provider: string, userId: string): string {
+export function getAuthorizationUrl(provider: string, userId: string, clientUrl?: string): string {
   const config = getProviderConfig(provider);
   if (!config?.clientId) throw new Error(`OAuth not configured for ${provider}. Add client ID/secret to .env or use manual token.`);
 
-  const state = provider === 'whoop'
-    ? createWhoopState(userId, provider)
-    : createOAuthState(userId, provider);
+  const urls = resolveOAuthUrls(clientUrl);
+  const ctx: OAuthContext = {
+    userId,
+    provider,
+    redirectUri: urls.redirectUri,
+    clientUrl: urls.clientUrl,
+  };
+
+  const state = provider === 'whoop' ? createWhoopState(ctx) : createJwtState(ctx);
   const params = new URLSearchParams({
     client_id: config.clientId,
-    redirect_uri: OAUTH_CALLBACK,
+    redirect_uri: ctx.redirectUri,
     response_type: 'code',
     state,
     ...(config.scopes.length > 0 && { scope: config.scopes.join(config.provider === 'strava' ? ',' : ' ') }),
@@ -157,21 +184,23 @@ export function getAuthorizationUrl(provider: string, userId: string): string {
   return `${config.authUrl}?${params}`;
 }
 
-export async function exchangeCodeForTokens(provider: string, code: string) {
+export async function exchangeCodeForTokens(provider: string, code: string, redirectUri = OAUTH_CALLBACK) {
   const config = getProviderConfig(provider);
   if (!config) throw new Error(`Unknown provider: ${provider}`);
 
   const body = new URLSearchParams({
     grant_type: 'authorization_code',
     code,
-    redirect_uri: OAUTH_CALLBACK,
+    redirect_uri: redirectUri,
     client_id: config.clientId,
     client_secret: config.clientSecret,
   });
 
-  const headers: Record<string, string> = { 'Content-Type': 'application/x-www-form-urlencoded' };
-
-  const response = await fetch(config.tokenUrl, { method: 'POST', headers, body });
+  const response = await fetch(config.tokenUrl, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body,
+  });
   if (!response.ok) {
     const err = await response.text();
     throw new Error(`Token exchange failed: ${err}`);
@@ -181,7 +210,12 @@ export async function exchangeCodeForTokens(provider: string, code: string) {
   return normalizeTokens(data);
 }
 
-export async function refreshOAuthToken(provider: string, refreshToken: string, existingRefresh?: string) {
+export async function refreshOAuthToken(
+  provider: string,
+  refreshToken: string,
+  existingRefresh?: string,
+  redirectUri = OAUTH_CALLBACK,
+) {
   const config = getProviderConfig(provider);
   if (!config) throw new Error(`Unknown provider: ${provider}`);
   if (!config.clientId || !config.clientSecret) {
@@ -195,15 +229,16 @@ export async function refreshOAuthToken(provider: string, refreshToken: string, 
     client_secret: config.clientSecret,
   };
 
-  // WHOOP (Auth0) requires redirect_uri on refresh
   if (provider === 'whoop') {
     bodyParams.scope = 'offline';
-    bodyParams.redirect_uri = OAUTH_CALLBACK;
+    bodyParams.redirect_uri = redirectUri;
   }
 
-  const body = new URLSearchParams(bodyParams);
-
-  const response = await fetch(config.tokenUrl, { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body });
+  const response = await fetch(config.tokenUrl, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams(bodyParams),
+  });
   if (!response.ok) {
     const err = await response.text();
     throw new Error(`Token refresh failed (${provider}): ${err}`);
@@ -227,8 +262,8 @@ export function getOAuthAvailability() {
   );
 }
 
-export function getOAuthCallbackUrl() {
-  return OAUTH_CALLBACK;
+export function getOAuthCallbackUrl(clientUrl?: string) {
+  return resolveOAuthUrls(clientUrl).redirectUri;
 }
 
 export const MANUAL_TOKEN_PROVIDERS = [

@@ -76,7 +76,9 @@ export async function refreshTokenIfNeeded(
     }
     const newCreds = await refreshFn(creds.refresh_token as string);
     const merged = { ...creds, ...newCreds, refresh_token: newCreds.refresh_token ?? creds.refresh_token };
-    saveIntegration(userId, provider, merged);
+    const existing = getIntegration(userId, provider);
+    const prevConfig = existing?.config ? JSON.parse(existing.config) : {};
+    saveIntegration(userId, provider, merged, prevConfig, true);
     // Keep unified Google tokens in sync
     if (['google', 'google_calendar', 'gmail'].includes(provider)) {
       for (const p of ['google', 'google_calendar', 'gmail']) {

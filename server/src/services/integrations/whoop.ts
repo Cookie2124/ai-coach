@@ -31,7 +31,12 @@ interface ImportCounts {
 }
 
 async function getWhoopToken(userId: string): Promise<string> {
-  return refreshTokenIfNeeded(userId, 'whoop', (rt) => refreshOAuthToken('whoop', rt, rt));
+  const integration = getIntegration(userId, 'whoop');
+  const config = integration?.config ? JSON.parse(integration.config) : {};
+  const redirectUri = (config.oauth_redirect_uri as string) || undefined;
+  return refreshTokenIfNeeded(userId, 'whoop', (rt) =>
+    refreshOAuthToken('whoop', rt, rt, redirectUri),
+  );
 }
 
 async function whoopFetch<T = unknown>(endpoint: string, token: string): Promise<T> {

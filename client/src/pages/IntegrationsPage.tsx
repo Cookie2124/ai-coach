@@ -45,7 +45,8 @@ export default function IntegrationsPage() {
   };
 
   const load = useCallback(() => {
-    Promise.all([api.integrations.list(), api.integrations.getProviders()])
+    const clientOrigin = window.location.origin;
+    Promise.all([api.integrations.list(), api.integrations.getProviders(clientOrigin)])
       .then(([list, meta]) => {
         setIntegrations(list as IntegrationStatus[]);
         setProviders(meta.providers as Record<string, ProviderInfo>);
@@ -88,7 +89,7 @@ export default function IntegrationsPage() {
 
   const handleOAuthConnect = async (provider: string) => {
     try {
-      const { url } = await api.integrations.connect(provider);
+      const { url } = await api.integrations.connect(provider, window.location.origin);
       window.location.href = url;
     } catch (err) {
       setMessage({ type: 'error', text: (err as Error).message });
@@ -270,9 +271,9 @@ export default function IntegrationsPage() {
                   </div>
                   <ul className="mt-2 text-xs text-gray-500 space-y-1 list-disc pl-4">
                     <li>Port <strong>3001</strong> (API), not 5173 (web UI)</li>
-                    <li>Use <strong>localhost</strong>, not 127.0.0.1</li>
-                    <li>No trailing slash</li>
-                    <li>Must match exactly — then restart server and click Connect</li>
+                    <li>When using your phone, register your PC&apos;s IP (e.g. Tailscale <strong>100.x.x.x</strong>)</li>
+                    <li>URI updates automatically based on how you opened this page</li>
+                    <li>No trailing slash — restart server after .env changes, then Connect</li>
                   </ul>
                 </div>
               )}

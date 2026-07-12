@@ -1,12 +1,12 @@
 import { Router, Request, Response } from 'express';
 import { authMiddleware, type AuthRequest } from '../middleware/auth.js';
-import { env, OAUTH_CALLBACK } from '../config/env.js';
+import { env, resolveOAuthUrls } from '../config/env.js';
 import {
   getAuthorizationUrl, exchangeCodeForTokens, verifyOAuthState,
   getOAuthAvailability, PROVIDER_INFO, isOAuthAvailable, getOAuthCallbackUrl,
 } from '../services/integrations/oauth.js';
 import {
-  getIntegrationStatus, saveIntegration, disconnectIntegration,
+  getIntegrationStatus, saveIntegration, disconnectIntegration, getIntegration,
 } from '../services/integrations/base.js';
 import { syncProvider, SYNC_PROVIDERS } from '../services/integrations/index.js';
 import { configureWhoopToken, syncWhoopData } from '../services/integrations/whoop.js';
@@ -17,20 +17,30 @@ import { runLearningCycle } from '../services/learning/index.js';
 const router = Router();
 
 router.get('/oauth/callback', async (req: Request, res: Response) => {
+  const fallbackClient = env.CLIENT_URL;
   try {
     const { code, state, error } = req.query;
-    if (error) return res.redirect(`${env.CLIENT_URL}/integrations?error=${encodeURIComponent(String(error))}`);
-    if (!code || !state) return res.redirect(`${env.CLIENT_URL}/integrations?error=missing_params`);
+    if (error) return res.redirect(`${fallbackClient}/integrations?error=${encodeURIComponent(String(error))}`);
+    if (!code || !state) return res.redirect(`${fallbackClient}/integrations?error=missing_params`);
 
-    const { userId, provider } = verifyOAuthState(String(state));
-    const tokens = await exchangeCodeForTokens(provider, String(code));
+    const oauthCtx = verifyOAuthState(String(state));
+    const { userId, provider, redirectUri, clientUrl } = oauthCtx;
+    const tokens = await exchangeCodeForTokens(provider, String(code), redirectUri);
+
+    const existing = getIntegration(userId, provider);
+    const prevConfig = existing?.config ? JSON.parse(existing.config) : {};
+    const oauthConfig = {
+      ...prevConfig,
+      oauth_redirect_uri: redirectUri,
+      oauth_client_url: clientUrl,
+    };
 
     if (provider === 'google') {
-      mirrorGoogleCredentials(userId, tokens);
+      mirrorGoogleCredentials(userId, tokens, oauthConfig);
     } else if (provider === 'google_calendar' || provider === 'gmail') {
-      mirrorGoogleCredentials(userId, tokens);
+      mirrorGoogleCredentials(userId, tokens, oauthConfig);
     } else {
-      saveIntegration(userId, provider, tokens);
+      saveIntegration(userId, provider, tokens, oauthConfig);
     }
 
     if (provider === 'whoop') {
@@ -39,9 +49,9 @@ router.get('/oauth/callback', async (req: Request, res: Response) => {
         runLearningCycle(userId);
         const stats = result.stats;
         const summary = `${result.recovery} recovery, ${result.sleep} sleep, ${result.workouts} workouts (${stats.recovery.earliest ?? '?'} → ${stats.recovery.latest ?? '?'})`;
-        return res.redirect(`${env.CLIENT_URL}/integrations?connected=${provider}&synced=${encodeURIComponent(summary)}`);
+        return res.redirect(`${clientUrl}/integrations?connected=${provider}&synced=${encodeURIComponent(summary)}`);
       } catch (syncErr) {
-        return res.redirect(`${env.CLIENT_URL}/integrations?connected=${provider}&error=${encodeURIComponent('Connected but initial sync failed: ' + (syncErr as Error).message)}`);
+        return res.redirect(`${clientUrl}/integrations?connected=${provider}&error=${encodeURIComponent('Connected but initial sync failed: ' + (syncErr as Error).message)}`);
       }
     }
 
@@ -50,34 +60,38 @@ router.get('/oauth/callback', async (req: Request, res: Response) => {
         const result = await syncGoogleAll(userId);
         runLearningCycle(userId);
         const summary = `${result.events ?? 0} events, ${result.emails ?? 0} emails`;
-        return res.redirect(`${env.CLIENT_URL}/integrations?connected=${provider}&synced=${encodeURIComponent(summary)}`);
+        return res.redirect(`${clientUrl}/integrations?connected=${provider}&synced=${encodeURIComponent(summary)}`);
       } catch (syncErr) {
-        return res.redirect(`${env.CLIENT_URL}/integrations?connected=${provider}&error=${encodeURIComponent('Connected but initial sync failed: ' + (syncErr as Error).message)}`);
+        return res.redirect(`${clientUrl}/integrations?connected=${provider}&error=${encodeURIComponent('Connected but initial sync failed: ' + (syncErr as Error).message)}`);
       }
     }
 
-    res.redirect(`${env.CLIENT_URL}/integrations?connected=${provider}`);
+    res.redirect(`${clientUrl}/integrations?connected=${provider}`);
   } catch (err) {
-    res.redirect(`${env.CLIENT_URL}/integrations?error=${encodeURIComponent((err as Error).message)}`);
+    res.redirect(`${fallbackClient}/integrations?error=${encodeURIComponent((err as Error).message)}`);
   }
 });
 
 router.use(authMiddleware);
 
-router.get('/providers', (_req, res) => {
+router.get('/providers', (req, res) => {
+  const clientUrl = typeof req.query.client_url === 'string' ? req.query.client_url : undefined;
+  const urls = resolveOAuthUrls(clientUrl);
   res.json({
     providers: PROVIDER_INFO,
     oauthAvailable: getOAuthAvailability(),
-    oauthCallbackUrl: getOAuthCallbackUrl(),
+    oauthCallbackUrl: urls.redirectUri,
+    oauthClientUrl: urls.clientUrl,
     oauthSetup: {
       whoop: {
-        redirectUri: getOAuthCallbackUrl(),
+        redirectUri: urls.redirectUri,
         dashboardUrl: 'https://developer-dashboard.whoop.com',
         hints: [
-          'Register the redirect URI exactly — character for character, including http vs https',
-          'Use localhost, not 127.0.0.1 (they are different to OAuth)',
-          'Port must be 3001 (API server), not 5173 (Vite dev UI)',
-          'No trailing slash at the end',
+          'Register the redirect URI shown below — it updates based on how you open the app',
+          'Phone/Tailscale: use your machine IP on port 3001, not 5173',
+          'Example: http://100.96.108.122:3001/api/integrations/oauth/callback',
+          'You can register multiple redirect URIs (localhost + phone IP) in WHOOP',
+          'No trailing slash',
         ],
       },
     },
@@ -94,8 +108,9 @@ router.get('/:provider/connect', (req: AuthRequest, res) => {
     if (!isOAuthAvailable(provider)) {
       return res.status(400).json({ error: `OAuth not configured for ${provider}. Use manual token or add credentials to .env` });
     }
-    const url = getAuthorizationUrl(provider, req.userId!);
-    res.json({ url });
+    const clientUrl = typeof req.query.client_url === 'string' ? req.query.client_url : undefined;
+    const url = getAuthorizationUrl(provider, req.userId!, clientUrl);
+    res.json({ url, redirectUri: getOAuthCallbackUrl(clientUrl) });
   } catch (error) {
     res.status(400).json({ error: (error as Error).message });
   }
