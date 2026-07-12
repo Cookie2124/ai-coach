@@ -1,7 +1,6 @@
 import { Request, Response, NextFunction } from 'express';
 import jwt from 'jsonwebtoken';
-
-const JWT_SECRET = process.env.JWT_SECRET || 'aicoach-local-dev-secret-change-in-production';
+import { env } from '../config/env.js';
 
 export interface AuthRequest extends Request {
   userId?: string;
@@ -15,7 +14,7 @@ export function authMiddleware(req: AuthRequest, res: Response, next: NextFuncti
 
   try {
     const token = header.slice(7);
-    const payload = jwt.verify(token, JWT_SECRET) as { userId: string };
+    const payload = jwt.verify(token, env.JWT_SECRET) as { userId: string };
     req.userId = payload.userId;
     next();
   } catch {
@@ -24,7 +23,5 @@ export function authMiddleware(req: AuthRequest, res: Response, next: NextFuncti
 }
 
 export function signToken(userId: string): string {
-  return jwt.sign({ userId }, JWT_SECRET, { expiresIn: '30d' });
+  return jwt.sign({ userId }, env.JWT_SECRET, { expiresIn: '30d' });
 }
-
-export { JWT_SECRET };

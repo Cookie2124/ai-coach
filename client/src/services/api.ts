@@ -15,7 +15,10 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   const res = await fetch(`${API_BASE}${path}`, { ...options, headers });
   if (res.status === 401) {
     localStorage.removeItem('aicoach_token');
-    window.location.href = '/login';
+    const isAuthRequest = path.startsWith('/auth/login') || path.startsWith('/auth/register');
+    if (!isAuthRequest && !window.location.pathname.startsWith('/login')) {
+      window.location.replace('/login');
+    }
     throw new Error('Unauthorized');
   }
   if (!res.ok) {

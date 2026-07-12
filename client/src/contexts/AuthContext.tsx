@@ -36,12 +36,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const login = async (email: string, password: string) => {
     const { token, user } = await api.auth.login({ email, password });
     localStorage.setItem('aicoach_token', token);
+    await api.auth.me();
     setUser(user);
   };
 
   const register = async (email: string, password: string, name: string) => {
     const { token, user } = await api.auth.register({ email, password, name });
     localStorage.setItem('aicoach_token', token);
+    await api.auth.me();
     setUser(user);
   };
 
