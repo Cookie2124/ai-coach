@@ -70,8 +70,17 @@ export const FOOD_DATABASE: Record<string, FoodEntry> = {
   // Snacks & extras
   'peanut butter': { calories: 5.88, protein: 0.25, carbs: 0.20, fat: 0.50, fibre: 0.08, unit: 'g', aliases: ['pb'] },
   'almonds': { calories: 5.79, protein: 0.21, carbs: 0.22, fat: 0.50, fibre: 0.12, unit: 'g', aliases: ['nuts'] },
+  // Whey ~80% protein by weight; per gram values
+  'whey protein': {
+    calories: 4,
+    protein: 0.8,
+    carbs: 0.05,
+    fat: 0.03,
+    fibre: 0,
+    unit: 'g',
+    aliases: ['whey', 'whey protein powder', 'whey isolate', 'protein powder', 'protein scoop'],
+  },
   'protein shake': { calories: 120, protein: 25, carbs: 3, fat: 1.5, fibre: 0, unit: 'serving', aliases: ['shake'] },
-  'protein powder': { calories: 120, protein: 25, carbs: 3, fat: 1.5, fibre: 0, unit: 'scoop' },
   'protein bar': { calories: 200, protein: 20, carbs: 22, fat: 7, fibre: 3, unit: 'bar' },
   'chocolate': { calories: 5.46, protein: 0.078, carbs: 0.61, fat: 0.31, fibre: 0.07, unit: 'g' },
   'honey': { calories: 3.04, protein: 0.003, carbs: 0.82, fat: 0, fibre: 0.002, unit: 'g' },
@@ -105,61 +114,119 @@ function foodLookup(): { key: string; entry: FoodEntry }[] {
 }
 
 const LOOKUP = foodLookup();
+const WHEY_ENTRY = FOOD_DATABASE['whey protein'];
+
+function textIncludesFood(text: string, key: string): boolean {
+  const escaped = key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  if (key.length <= 5) {
+    return new RegExp(`\\b${escaped}\\b`, 'i').test(text);
+  }
+  return text.includes(key);
+}
+
+/** e.g. "30g protein", "30g of whey protein", "30g whey protein" */
+function parseStatedProteinGrams(lower: string): number | null {
+  const match = lower.match(
+    /(\d+(?:\.\d+)?)\s*g(?:rams?)?(?:\s*(?:of\s+))?(?:\s*(?:whey|pea|plant|casein|isolate)\s+)?protein\b/,
+  );
+  return match ? parseFloat(match[1]) : null;
+}
+
+/** e.g. "30g whey" when not already parsed as protein grams */
+function parseWheyPowderGrams(lower: string): number | null {
+  if (parseStatedProteinGrams(lower) != null) return null;
+  const match = lower.match(
+    /(\d+(?:\.\d+)?)\s*g(?:rams?)?(?:\s*(?:of\s+))?whey(?:\s+protein)?(?:\s+powder)?\b/,
+  );
+  return match ? parseFloat(match[1]) : null;
+}
+
+function addFoodMacros(
+  entry: FoodEntry,
+  qty: number,
+  totals: { calories: number; protein: number; carbs: number; fat: number; fibre: number },
+  skipProtein = false,
+) {
+  totals.calories += entry.calories * qty;
+  if (!skipProtein) totals.protein += entry.protein * qty;
+  totals.carbs += entry.carbs * qty;
+  totals.fat += entry.fat * qty;
+  totals.fibre += entry.fibre * qty;
+}
 
 export function estimateMealNutrition(description: string) {
   const lower = description.toLowerCase();
-  let calories = 0, protein = 0, carbs = 0, fat = 0, fibre = 0;
+  const totals = { calories: 0, protein: 0, carbs: 0, fat: 0, fibre: 0 };
   const matched: string[] = [];
+  const matchedEntries = new Set<FoodEntry>();
+
+  const statedProtein = parseStatedProteinGrams(lower);
+  const wheyPowderG = parseWheyPowderGrams(lower);
 
   for (const { key, entry } of LOOKUP) {
-    if (!lower.includes(key)) continue;
+    if (!textIncludesFood(lower, key) || matchedEntries.has(entry)) continue;
+
+    if (statedProtein != null && entry === WHEY_ENTRY) continue;
+    if (statedProtein != null && (key === 'protein shake')) continue;
 
     let qty = 1;
     const escaped = key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     const foodPattern = new RegExp(
-      `(\\d+(?:\\.\\d+)?)\\s*(g|kg|ml|l|oz|serving|scoop|egg|eggs|banana|bananas|biscuit|slice|slices|cup|cups|bowl|bowls|bar|roll|wrap|burger|pancake|bagel)?\\s*${escaped}|${escaped}\\s*(\\d+(?:\\.\\d+)?)?\\s*(g|kg|ml|l)?`,
+      `(\\d+(?:\\.\\d+)?)\\s*(g|kg|ml|l|oz|serving|scoop|scoups|egg|eggs|banana|bananas|biscuit|slice|slices|cup|cups|bowl|bowls|bar|roll|wrap|burger|pancake|bagel)?\\s*${escaped}|${escaped}\\s*(?:\\(|\\s)*(\\d+(?:\\.\\d+)?)?\\s*(g|kg|ml|l|scoop|scoups)?`,
       'i',
     );
     const match = lower.match(foodPattern);
 
     if (match) {
       const num = parseFloat(match[1] || match[3] || '1');
-      const unit = match[2] || match[4] || entry.unit;
+      const unit = (match[2] || match[4] || entry.unit).toLowerCase();
       if (unit === 'kg') qty = num * 1000;
       else if (unit === 'l') qty = num * 1000;
       else if (unit === 'ml' || unit === 'g') qty = num;
+      else if (unit === 'scoop' || unit === 'scoups') qty = num;
       else qty = num;
     } else {
       const countMatch = lower.match(new RegExp(`(\\d+)\\s*${escaped}`, 'i'));
-      if (countMatch) qty = parseInt(countMatch[1]);
+      if (countMatch) qty = parseInt(countMatch[1], 10);
+      else if (entry === WHEY_ENTRY && /\bscoop/.test(lower)) qty = 30;
     }
 
-    if (entry.unit === 'g' || entry.unit === 'ml' || entry.unit === '100ml') {
-      calories += entry.calories * qty;
-      protein += entry.protein * qty;
-      carbs += entry.carbs * qty;
-      fat += entry.fat * qty;
-      fibre += entry.fibre * qty;
-    } else {
-      calories += entry.calories * qty;
-      protein += entry.protein * qty;
-      carbs += entry.carbs * qty;
-      fat += entry.fat * qty;
-      fibre += entry.fibre * qty;
-    }
+    // Smoothie/shake base only — protein comes from stated whey amount
+    const skipProtein = statedProtein != null && (key === 'smoothie' || key === 'protein shake');
+
+    addFoodMacros(entry, qty, totals, skipProtein);
     matched.push(key);
+    matchedEntries.add(entry);
   }
 
-  if (calories === 0) {
-    calories = 400; protein = 25; carbs = 40; fat = 15; fibre = 3;
+  if (statedProtein != null) {
+    totals.protein += statedProtein;
+    matched.push(`${statedProtein}g protein`);
+  } else if (wheyPowderG != null) {
+    addFoodMacros(
+      FOOD_DATABASE['whey protein'],
+      wheyPowderG,
+      totals,
+    );
+    matched.push(`${wheyPowderG}g whey`);
+  }
+
+  if (totals.calories === 0 && statedProtein == null && wheyPowderG == null) {
+    totals.calories = 400;
+    totals.protein = 25;
+    totals.carbs = 40;
+    totals.fat = 15;
+    totals.fibre = 3;
+  } else if (totals.calories === 0 && (statedProtein != null || wheyPowderG != null)) {
+    totals.calories = Math.round(totals.protein * 4 + totals.carbs * 4 + totals.fat * 9) || 200;
   }
 
   return {
-    calories: Math.round(calories),
-    protein_g: Math.round(protein * 10) / 10,
-    carbs_g: Math.round(carbs * 10) / 10,
-    fat_g: Math.round(fat * 10) / 10,
-    fibre_g: Math.round(fibre * 10) / 10,
+    calories: Math.round(totals.calories),
+    protein_g: Math.round(totals.protein * 10) / 10,
+    carbs_g: Math.round(totals.carbs * 10) / 10,
+    fat_g: Math.round(totals.fat * 10) / 10,
+    fibre_g: Math.round(totals.fibre * 10) / 10,
     matchedFoods: matched,
     estimated: matched.length > 0,
   };
