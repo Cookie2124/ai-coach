@@ -35,6 +35,33 @@ export const env = {
 
 export const OAUTH_CALLBACK = env.OAUTH_REDIRECT_URI || `${env.APP_URL.replace(/\/$/, '')}/api/integrations/oauth/callback`;
 
+/** WHOOP only accepts localhost or https redirect URIs — not Tailscale/LAN IPs. */
+export function resolveWhoopOAuthUrls(clientUrl?: string) {
+  const port = env.PORT || '3001';
+  const localhostRedirect = env.OAUTH_REDIRECT_URI || `http://localhost:${port}/api/integrations/oauth/callback`;
+  const urls = resolveOAuthUrls(clientUrl);
+
+  if (!clientUrl) {
+    return { ...urls, redirectUri: localhostRedirect };
+  }
+
+  try {
+    const client = new URL(clientUrl);
+    const isLocal = client.hostname === 'localhost' || client.hostname === '127.0.0.1';
+    if (isLocal) {
+      const redirectUri = env.OAUTH_REDIRECT_URI || `http://${client.hostname}:${port}/api/integrations/oauth/callback`;
+      return {
+        clientUrl: client.origin,
+        appUrl: `${client.protocol}//${client.hostname}:${port}`,
+        redirectUri,
+      };
+    }
+    return { ...urls, redirectUri: localhostRedirect };
+  } catch {
+    return { ...urls, redirectUri: localhostRedirect };
+  }
+}
+
 /** Resolve API + OAuth callback URLs from where the user opened the app (e.g. phone on Tailscale). */
 export function resolveOAuthUrls(clientUrl?: string) {
   const fallbackClient = env.CLIENT_URL.replace(/\/$/, '');

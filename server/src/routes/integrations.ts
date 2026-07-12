@@ -1,6 +1,6 @@
 import { Router, Request, Response } from 'express';
 import { authMiddleware, type AuthRequest } from '../middleware/auth.js';
-import { env, resolveOAuthUrls } from '../config/env.js';
+import { env, resolveOAuthUrls, resolveWhoopOAuthUrls } from '../config/env.js';
 import {
   getAuthorizationUrl, exchangeCodeForTokens, verifyOAuthState,
   getOAuthAvailability, PROVIDER_INFO, isOAuthAvailable, getOAuthCallbackUrl,
@@ -80,6 +80,7 @@ router.use(authMiddleware);
 router.get('/providers', (req, res) => {
   const clientUrl = typeof req.query.client_url === 'string' ? req.query.client_url : undefined;
   const urls = resolveOAuthUrls(clientUrl);
+  const whoopUrls = resolveWhoopOAuthUrls(clientUrl);
   res.json({
     providers: PROVIDER_INFO,
     oauthAvailable: getOAuthAvailability(),
@@ -87,13 +88,13 @@ router.get('/providers', (req, res) => {
     oauthClientUrl: urls.clientUrl,
     oauthSetup: {
       whoop: {
-        redirectUri: urls.redirectUri,
+        redirectUri: whoopUrls.redirectUri,
         dashboardUrl: 'https://developer-dashboard.whoop.com',
         hints: [
-          'Register the redirect URI shown below — it updates based on how you open the app',
-          'Phone/Tailscale: use your machine IP on port 3001, not 5173',
-          'Example: http://100.96.108.122:3001/api/integrations/oauth/callback',
-          'You can register multiple redirect URIs (localhost + phone IP) in WHOOP',
+          'WHOOP only accepts localhost or https redirect URIs — not Tailscale/LAN IPs',
+          'Register the localhost URI shown below in the WHOOP Developer Dashboard',
+          'Connect from localhost (browser on Pi, or SSH tunnel from your PC)',
+          'After connecting once, sync works from your phone too',
           'No trailing slash',
         ],
       },
@@ -113,7 +114,7 @@ router.get('/:provider/connect', (req: AuthRequest, res) => {
     }
     const clientUrl = typeof req.query.client_url === 'string' ? req.query.client_url : undefined;
     const url = getAuthorizationUrl(provider, req.userId!, clientUrl);
-    const { redirectUri } = resolveOAuthUrls(clientUrl);
+    const { redirectUri } = provider === 'whoop' ? resolveWhoopOAuthUrls(clientUrl) : resolveOAuthUrls(clientUrl);
     console.log(`[oauth] ${provider} connect redirect_uri=${redirectUri} client=${clientUrl ?? 'default'}`);
     res.json({ url, redirectUri });
   } catch (error) {

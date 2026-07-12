@@ -1,7 +1,7 @@
 import jwt from 'jsonwebtoken';
 import crypto from 'crypto';
 import { db } from '../../db/database.js';
-import { env, OAUTH_CALLBACK, resolveOAuthUrls } from '../../config/env.js';
+import { env, OAUTH_CALLBACK, resolveOAuthUrls, resolveWhoopOAuthUrls } from '../../config/env.js';
 
 export interface OAuthContext {
   userId: string;
@@ -178,7 +178,7 @@ export function getAuthorizationUrl(provider: string, userId: string, clientUrl?
   const config = getProviderConfig(provider);
   if (!config?.clientId) throw new Error(`OAuth not configured for ${provider}. Add client ID/secret to .env or use manual token.`);
 
-  const urls = resolveOAuthUrls(clientUrl);
+  const urls = provider === 'whoop' ? resolveWhoopOAuthUrls(clientUrl) : resolveOAuthUrls(clientUrl);
   const ctx: OAuthContext = {
     userId,
     provider,
@@ -211,10 +211,6 @@ export async function exchangeCodeForTokens(provider: string, code: string, redi
     client_secret: config.clientSecret,
   };
 
-  if (provider === 'whoop') {
-    bodyParams.scope = 'offline';
-  }
-
   const response = await fetch(config.tokenUrl, {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
@@ -222,11 +218,16 @@ export async function exchangeCodeForTokens(provider: string, code: string, redi
   });
   if (!response.ok) {
     const err = await response.text();
+    console.error(`[oauth] ${provider} token exchange failed redirect_uri=${redirectUri} body=${err}`);
     let message = err;
     try {
       const parsed = JSON.parse(err) as { error?: string; error_description?: string };
-      if (parsed.error === 'invalid_request' && parsed.error_description?.includes('redirect_uri')) {
-        message = `WHOOP redirect URI mismatch. Register this exact URL in the WHOOP Developer Dashboard: ${redirectUri}`;
+      if (parsed.error === 'invalid_request') {
+        if (parsed.error_description?.includes('redirect_uri')) {
+          message = `WHOOP redirect URI mismatch. Register this exact URL in the WHOOP Developer Dashboard: ${redirectUri}`;
+        } else if (provider === 'whoop') {
+          message = `${parsed.error}: ${parsed.error_description ?? 'Check redirect URI is http://localhost:3001/... (not an IP) and matches WHOOP dashboard exactly'}`;
+        }
       } else if (parsed.error_description) {
         message = `${parsed.error}: ${parsed.error_description}`;
       }
@@ -290,8 +291,10 @@ export function getOAuthAvailability() {
   );
 }
 
-export function getOAuthCallbackUrl(clientUrl?: string) {
-  return resolveOAuthUrls(clientUrl).redirectUri;
+export function getOAuthCallbackUrl(clientUrl?: string, provider?: string) {
+  return provider === 'whoop'
+    ? resolveWhoopOAuthUrls(clientUrl).redirectUri
+    : resolveOAuthUrls(clientUrl).redirectUri;
 }
 
 export const MANUAL_TOKEN_PROVIDERS = [

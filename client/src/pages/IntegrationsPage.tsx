@@ -27,6 +27,7 @@ export default function IntegrationsPage() {
   const [providers, setProviders] = useState<Record<string, ProviderInfo>>({});
   const [oauthAvailable, setOauthAvailable] = useState<Record<string, boolean>>({});
   const [oauthCallbackUrl, setOauthCallbackUrl] = useState('');
+  const [whoopRedirectUri, setWhoopRedirectUri] = useState('');
   const [loading, setLoading] = useState(true);
   const [syncing, setSyncing] = useState<string | null>(null);
   const [expanded, setExpanded] = useState<string | null>(null);
@@ -38,8 +39,9 @@ export default function IntegrationsPage() {
   const [copiedRedirect, setCopiedRedirect] = useState(false);
 
   const copyRedirectUri = async () => {
-    if (!oauthCallbackUrl) return;
-    await navigator.clipboard.writeText(oauthCallbackUrl);
+    const uri = whoopRedirectUri || oauthCallbackUrl;
+    if (!uri) return;
+    await navigator.clipboard.writeText(uri);
     setCopiedRedirect(true);
     setTimeout(() => setCopiedRedirect(false), 2000);
   };
@@ -52,6 +54,7 @@ export default function IntegrationsPage() {
         setProviders(meta.providers as Record<string, ProviderInfo>);
         setOauthAvailable(meta.oauthAvailable as Record<string, boolean>);
         setOauthCallbackUrl((meta as { oauthCallbackUrl?: string }).oauthCallbackUrl ?? '');
+        setWhoopRedirectUri((meta as { oauthSetup?: { whoop?: { redirectUri?: string } } }).oauthSetup?.whoop?.redirectUri ?? '');
         const whoopConnected = (list as IntegrationStatus[]).some(i => i.provider === 'whoop' && i.connected);
         if (whoopConnected) {
           api.integrations.whoopStatus().then(setWhoopStats).catch(() => setWhoopStats(null));
@@ -104,6 +107,20 @@ export default function IntegrationsPage() {
       return;
     }
     handleOAuthConnect('google');
+  };
+
+  const handleWhoopConnect = () => {
+    if (isIpHostname) {
+      setMessage({
+        type: 'error',
+        text: `WHOOP does not accept IP addresses (like ${window.location.hostname}) as OAuth redirect URLs. `
+          + `Use SSH tunnel: ssh -L ${appPort}:localhost:${appPort} pi@${window.location.hostname} `
+          + `then open http://localhost:${appPort}/integrations on your computer and connect WHOOP there. `
+          + `Once connected, sync works from your phone too.`,
+      });
+      return;
+    }
+    handleOAuthConnect('whoop');
   };
 
   const handleOAuthConnect = async (provider: string) => {
@@ -292,29 +309,29 @@ export default function IntegrationsPage() {
                   )}
                 </p>
               )}
-              {oauthCallbackUrl && (
+              {(whoopRedirectUri || oauthCallbackUrl) && (
                 <div className="mt-3 p-3 rounded-xl bg-white dark:bg-gray-800 border border-brand-500/20">
                   <p className="text-xs font-medium text-gray-700 dark:text-gray-300 mb-2">
                     Step 1 — Add this <strong>exact</strong> Redirect URI in the{' '}
                     <a href="https://developer-dashboard.whoop.com" className="text-brand-500 hover:underline" target="_blank" rel="noreferrer">WHOOP Developer Dashboard</a>:
                   </p>
                   <div className="flex gap-2 items-start">
-                    <code className="flex-1 p-2 bg-gray-50 dark:bg-gray-900 rounded text-xs break-all">{oauthCallbackUrl}</code>
+                    <code className="flex-1 p-2 bg-gray-50 dark:bg-gray-900 rounded text-xs break-all">{whoopRedirectUri || oauthCallbackUrl}</code>
                     <button type="button" onClick={copyRedirectUri} className="btn-secondary text-xs px-3 shrink-0">
                       {copiedRedirect ? <Check className="w-4 h-4" /> : <Copy className="w-4 h-4" />}
                     </button>
                   </div>
                   <ul className="mt-2 text-xs text-gray-500 space-y-1 list-disc pl-4">
-                    <li>Port <strong>3001</strong> (API), not 5173 (web UI)</li>
-                    <li>When using your phone, register your PC&apos;s IP (e.g. Tailscale <strong>100.x.x.x</strong>)</li>
-                    <li>URI updates automatically based on how you opened this page</li>
+                    <li>WHOOP requires <strong>localhost</strong> — IP addresses like Tailscale are not accepted</li>
+                    <li>Connect via browser on the Pi, or SSH tunnel from your PC (same as Google)</li>
+                    <li>After one-time connect, full history sync works from your phone</li>
                     <li>No trailing slash — restart server after .env changes, then Connect</li>
                   </ul>
                 </div>
               )}
             </div>
             {!getStatus('whoop')?.connected ? (
-              <button onClick={() => handleOAuthConnect('whoop')} className="btn-primary flex items-center gap-2 self-start px-6 py-3 text-base">
+              <button onClick={handleWhoopConnect} className="btn-primary flex items-center gap-2 self-start px-6 py-3 text-base">
                 <Link2 className="w-5 h-5" /> Connect WHOOP
               </button>
             ) : (
