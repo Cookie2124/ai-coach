@@ -15,14 +15,18 @@ export default defineConfig({
         theme_color: '#0ea5e9',
         background_color: '#0f172a',
         display: 'standalone',
+        orientation: 'portrait',
+        start_url: '/',
+        scope: '/',
         icons: [
-          { src: 'favicon.svg', sizes: 'any', type: 'image/svg+xml' },
+          { src: 'favicon.svg', sizes: 'any', type: 'image/svg+xml', purpose: 'any maskable' },
         ],
       },
     }),
   ],
   server: {
     port: 5173,
+    host: true,
     proxy: {
       '/api': { target: 'http://localhost:3001', changeOrigin: true },
     },

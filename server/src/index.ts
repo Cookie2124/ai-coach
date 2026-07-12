@@ -39,8 +39,9 @@ app.get('*', (_req, res) => {
   });
 });
 
-app.listen(PORT, () => {
+app.listen(Number(PORT), '0.0.0.0', () => {
   console.log(`\n  AiCoach Server running at http://localhost:${PORT}`);
+  console.log(`  Network: http://<your-ip>:${PORT}`);
   console.log(`  Local-first student athlete OS`);
   console.log(`  Data stored locally in ./data/\n`);
 });

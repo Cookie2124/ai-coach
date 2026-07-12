@@ -89,10 +89,10 @@ export default function NutritionPage() {
     <div className="space-y-6 animate-fade-in">
       <h1 className="text-2xl font-bold">Nutrition</h1>
 
-      <form onSubmit={logMeal} className="card p-4 flex gap-2">
+      <form onSubmit={logMeal} className="card p-4 mobile-stack">
         <input className="input flex-1" value={description} onChange={e => setDescription(e.target.value)}
-          placeholder='Log naturally: "I ate 250g chicken and rice" or use AI Coach' />
-        <button type="submit" className="btn-primary flex items-center gap-2"><Plus className="w-4 h-4" /> Log</button>
+          placeholder='Log: "250g chicken and rice"' />
+        <button type="submit" className="btn-primary flex items-center justify-center gap-2 sm:shrink-0"><Plus className="w-4 h-4" /> Log Meal</button>
       </form>
 
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
@@ -128,13 +128,13 @@ export default function NutritionPage() {
           <div className="space-y-6">
             {grouped.map(group => (
               <div key={group.day}>
-                <div className="flex justify-between items-center mb-2 pb-2 border-b border-gray-200 dark:border-gray-700">
+                <div className="flex flex-col sm:flex-row sm:justify-between sm:items-center gap-1 mb-2 pb-2 border-b border-gray-200 dark:border-gray-700">
                   <h4 className="font-medium text-sm">{formatDayHeader(group.meals[0].logged_at)}</h4>
                   <span className="text-xs text-gray-500">{fmtCalories(group.totals.calories)} · {fmtGrams(group.totals.protein)} protein</span>
                 </div>
                 <div className="space-y-2">
                   {group.meals.map(meal => (
-                    <div key={meal.id} className="flex justify-between items-center gap-2 py-2 pl-2 border-l-2 border-brand-500/30 group">
+                    <div key={meal.id} className="flex flex-wrap sm:flex-nowrap justify-between items-start sm:items-center gap-2 py-2 pl-2 border-l-2 border-brand-500/30 group">
                       <div className="flex-1 min-w-0">
                         <p className="text-sm font-medium">{meal.description}</p>
                         <p className="text-xs text-gray-500">
@@ -148,7 +148,7 @@ export default function NutritionPage() {
                       </div>
                       <button
                         onClick={() => removeMeal(meal)}
-                        className="p-2 rounded-lg text-gray-400 hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-900/20 opacity-60 group-hover:opacity-100 transition-opacity shrink-0"
+                        className="p-2 rounded-lg text-gray-400 hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-900/20 sm:opacity-60 sm:group-hover:opacity-100 transition-opacity shrink-0 touch-target"
                         title="Remove meal"
                       >
                         <Trash2 className="w-4 h-4" />

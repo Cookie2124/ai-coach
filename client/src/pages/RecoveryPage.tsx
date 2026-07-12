@@ -118,7 +118,7 @@ export default function RecoveryPage() {
 
           <h3 className="font-semibold mb-4">Recovery Trend ({Math.min(trends.length, 90)} days)</h3>
 
-          <ResponsiveContainer width="100%" height={280}>
+          <ResponsiveContainer width="100%" height={280} minWidth={280}>
 
             <LineChart data={chartData}>
 

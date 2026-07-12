@@ -377,7 +377,7 @@ export default function DashboardPage() {
 
             <h3 className="font-semibold mb-4">Recovery, Strain & HRV</h3>
 
-            <ResponsiveContainer width="100%" height={220}>
+            <ResponsiveContainer width="100%" height={220} minWidth={280}>
 
               <LineChart data={recoveryChart}>
 
@@ -411,7 +411,7 @@ export default function DashboardPage() {
 
             <h3 className="font-semibold mb-4">Sleep Duration & Quality</h3>
 
-            <ResponsiveContainer width="100%" height={220}>
+            <ResponsiveContainer width="100%" height={220} minWidth={280}>
 
               <LineChart data={sleepChart}>
 
@@ -445,7 +445,7 @@ export default function DashboardPage() {
 
             <h3 className="font-semibold mb-4">Weight Trend</h3>
 
-            <ResponsiveContainer width="100%" height={220}>
+            <ResponsiveContainer width="100%" height={220} minWidth={280}>
 
               <LineChart data={weightChart}>
 
@@ -533,12 +533,9 @@ export default function DashboardPage() {
 
             {summary.recentWorkouts.slice(0, 5).map((w, i) => (
 
-              <div key={i} className="flex justify-between text-sm py-2 border-b border-gray-100 dark:border-gray-800 last:border-0">
-
-                <span>{w.date} — {capitalize(String(w.type).replace('_', ' '))}</span>
-
-                <span className="text-gray-500">{w.duration} min · strain {fmtStrain(w.strain)}</span>
-
+              <div key={i} className="flex flex-col sm:flex-row sm:justify-between gap-1 text-sm py-2 border-b border-gray-100 dark:border-gray-800 last:border-0">
+                <span className="break-words">{w.date} — {capitalize(String(w.type).replace('_', ' '))}</span>
+                <span className="text-gray-500 shrink-0">{w.duration} min · strain {fmtStrain(w.strain)}</span>
               </div>
 
             ))}

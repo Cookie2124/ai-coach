@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
-import { Send, Bot, User, Sparkles, AlertCircle, CheckCircle2, Plus, MessageSquare, Trash2, Utensils } from 'lucide-react';
+import { Send, Bot, User, Sparkles, AlertCircle, CheckCircle2, Plus, MessageSquare, Trash2, Utensils, History, X } from 'lucide-react';
 import { api } from '../services/api';
 
 interface Message {
@@ -34,7 +34,7 @@ export default function ChatPage() {
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
   const [conversationId, setConversationId] = useState<string | undefined>();
-  const [showHistory, setShowHistory] = useState(true);
+  const [showHistory, setShowHistory] = useState(false);
   const [aiStatus, setAiStatus] = useState<{ configured: boolean; model: string; source: string; hint?: string } | null>(null);
   const [lastModel, setLastModel] = useState<string | null>(null);
   const [connectionTest, setConnectionTest] = useState<{ ok: boolean; model?: string; error?: string; latencyMs?: number } | null>(null);
@@ -126,71 +126,93 @@ export default function ChatPage() {
     });
   };
 
-  return (
-    <div className="flex gap-4 h-[calc(100vh-8rem)] lg:h-[calc(100vh-4rem)]">
-      {/* Conversation history sidebar */}
-      {showHistory && (
-        <aside className="hidden md:flex flex-col w-64 shrink-0 card overflow-hidden">
-          <div className="p-3 border-b border-gray-200 dark:border-gray-800 flex items-center justify-between">
-            <span className="font-semibold text-sm">Conversations</span>
-            <button onClick={startNewChat} className="p-1.5 rounded-lg hover:bg-brand-500/10 text-brand-500" title="New chat">
-              <Plus className="w-4 h-4" />
+  const conversationList = (
+    <>
+      <div className="p-3 border-b border-gray-200 dark:border-gray-800 flex items-center justify-between shrink-0">
+        <span className="font-semibold text-sm">Conversations</span>
+        <div className="flex items-center gap-1">
+          <button onClick={startNewChat} className="p-2 rounded-lg hover:bg-brand-500/10 text-brand-500 touch-target" title="New chat">
+            <Plus className="w-4 h-4" />
+          </button>
+          <button onClick={() => setShowHistory(false)} className="md:hidden p-2 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-800 touch-target" aria-label="Close history">
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+      </div>
+      <div className="flex-1 overflow-y-auto overscroll-contain p-2 space-y-1">
+        {conversations.length === 0 && (
+          <p className="text-xs text-gray-500 p-2">No saved chats yet</p>
+        )}
+        {conversations.map(conv => (
+          <button
+            key={conv.id}
+            onClick={() => { loadConversation(conv.id); setShowHistory(false); }}
+            className={`w-full text-left p-3 rounded-lg text-sm group flex items-start gap-2 touch-target ${
+              conversationId === conv.id ? 'bg-brand-500/10 text-brand-600' : 'hover:bg-gray-100 dark:hover:bg-gray-800'
+            }`}
+          >
+            <MessageSquare className="w-4 h-4 shrink-0 mt-0.5 opacity-50" />
+            <div className="flex-1 min-w-0">
+              <p className="font-medium truncate">{conv.title || 'Chat'}</p>
+              <p className="text-xs text-gray-500 truncate">{conv.last_message?.slice(0, 40)}</p>
+            </div>
+            <button onClick={e => deleteChat(conv.id, e)} className="md:opacity-0 md:group-hover:opacity-100 p-2 text-red-400 hover:text-red-500 touch-target">
+              <Trash2 className="w-3 h-3" />
             </button>
-          </div>
-          <div className="flex-1 overflow-y-auto p-2 space-y-1">
-            {conversations.length === 0 && (
-              <p className="text-xs text-gray-500 p-2">No saved chats yet</p>
-            )}
-            {conversations.map(conv => (
-              <button
-                key={conv.id}
-                onClick={() => loadConversation(conv.id)}
-                className={`w-full text-left p-2 rounded-lg text-sm group flex items-start gap-2 ${
-                  conversationId === conv.id ? 'bg-brand-500/10 text-brand-600' : 'hover:bg-gray-100 dark:hover:bg-gray-800'
-                }`}
-              >
-                <MessageSquare className="w-4 h-4 shrink-0 mt-0.5 opacity-50" />
-                <div className="flex-1 min-w-0">
-                  <p className="font-medium truncate">{conv.title || 'Chat'}</p>
-                  <p className="text-xs text-gray-500 truncate">{conv.last_message?.slice(0, 40)}</p>
-                </div>
-                <button onClick={e => deleteChat(conv.id, e)} className="opacity-0 group-hover:opacity-100 p-1 text-red-400 hover:text-red-500">
-                  <Trash2 className="w-3 h-3" />
-                </button>
-              </button>
-            ))}
-          </div>
-        </aside>
+          </button>
+        ))}
+      </div>
+    </>
+  );
+
+  return (
+    <div className="flex flex-1 min-h-0 gap-0 lg:gap-4 h-full">
+      {/* Desktop conversation sidebar */}
+      <aside className="hidden md:flex flex-col w-64 shrink-0 card overflow-hidden m-3 lg:m-0">
+        {conversationList}
+      </aside>
+
+      {/* Mobile conversation drawer */}
+      {showHistory && (
+        <>
+          <div className="md:hidden fixed inset-0 bg-black/50 z-40" onClick={() => setShowHistory(false)} aria-hidden />
+          <aside className="md:hidden fixed inset-y-0 left-0 z-50 w-[min(85vw,18rem)] card rounded-none flex flex-col pt-[env(safe-area-inset-top)]">
+            {conversationList}
+          </aside>
+        </>
       )}
 
-      <div className="flex-1 flex flex-col min-w-0">
-        <div className="mb-4">
-          <div className="flex flex-wrap items-start justify-between gap-3">
-            <div>
-              <h1 className="text-2xl font-bold flex items-center gap-2">
-                <Sparkles className="w-6 h-6 text-brand-500" /> AI Coach
+      <div className="flex-1 flex flex-col min-w-0 min-h-0 px-3 lg:px-0">
+        <div className="py-3 shrink-0">
+          <div className="flex flex-wrap items-start justify-between gap-2">
+            <div className="min-w-0 flex-1">
+              <h1 className="text-xl sm:text-2xl font-bold flex items-center gap-2">
+                <Sparkles className="w-5 h-5 sm:w-6 sm:h-6 text-brand-500 shrink-0" /> AI Coach
               </h1>
-              <p className="text-gray-500 text-sm">Say "Log: I ate..." to save meals with date &amp; time</p>
+              <p className="text-gray-500 text-xs sm:text-sm">Say &quot;Log: I ate...&quot; to save meals with date &amp; time</p>
             </div>
-            <div className="flex flex-wrap items-center gap-2">
-              <button onClick={startNewChat} className="md:hidden btn-secondary text-xs px-2 py-1 flex items-center gap-1">
+            <div className="flex flex-wrap items-center gap-2 shrink-0">
+              <button onClick={() => setShowHistory(true)} className="md:hidden btn-secondary text-xs px-3 py-2 flex items-center gap-1">
+                <History className="w-3 h-3" /> History
+              </button>
+              <button onClick={startNewChat} className="md:hidden btn-secondary text-xs px-3 py-2 flex items-center gap-1">
                 <Plus className="w-3 h-3" /> New
               </button>
               {aiStatus && (
-                <span className={`text-xs px-2 py-1 rounded-full flex items-center gap-1 ${
+                <span className={`text-xs px-2 py-1 rounded-full flex items-center gap-1 max-w-[10rem] truncate ${
                   aiStatus.configured ? 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400' : 'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400'
                 }`}>
-                  {aiStatus.configured ? <CheckCircle2 className="w-3 h-3" /> : <AlertCircle className="w-3 h-3" />}
-                  {aiStatus.configured ? `OpenRouter · ${lastModel ?? aiStatus.model}` : 'API key not configured'}
+                  {aiStatus.configured ? <CheckCircle2 className="w-3 h-3 shrink-0" /> : <AlertCircle className="w-3 h-3 shrink-0" />}
+                  <span className="truncate">{aiStatus.configured ? `OpenRouter · ${lastModel ?? aiStatus.model}` : 'No API key'}</span>
                 </span>
               )}
-              <button onClick={testConnection} className="text-xs px-2 py-1 rounded-full bg-gray-100 dark:bg-gray-800 hover:bg-brand-500/10">
-                Test connection
+              <button onClick={testConnection} className="text-xs px-2 py-1 rounded-full bg-gray-100 dark:bg-gray-800 hover:bg-brand-500/10 min-h-[36px]">
+                Test
               </button>
             </div>
           </div>
           {connectionTest && (
-            <p className={`text-xs mt-2 ${connectionTest.ok ? 'text-green-600' : 'text-amber-600'}`}>
+            <p className={`text-xs mt-2 break-words ${connectionTest.ok ? 'text-green-600' : 'text-amber-600'}`}>
               {connectionTest.ok
                 ? `Connected (${connectionTest.model}, ${connectionTest.latencyMs}ms)`
                 : `Connection issue: ${connectionTest.error}`}
@@ -198,7 +220,7 @@ export default function ChatPage() {
           )}
         </div>
 
-        <div className="flex-1 overflow-y-auto space-y-4 pb-4">
+        <div className="flex-1 overflow-y-auto overscroll-contain space-y-4 pb-4 min-h-0">
           {messages.length === 0 && (
             <div className="text-center py-8">
               <Bot className="w-12 h-12 text-brand-500 mx-auto mb-4" />
@@ -224,7 +246,7 @@ export default function ChatPage() {
                   <Bot className="w-4 h-4 text-brand-500" />
                 </div>
               )}
-              <div className={`max-w-[80%] rounded-2xl px-4 py-3 ${
+              <div className={`max-w-[min(100%,36rem)] sm:max-w-[80%] rounded-2xl px-4 py-3 ${
                 msg.role === 'user' ? 'bg-brand-500 text-white' : 'card'
               }`}>
                 <div className="text-sm">{formatContent(msg.content)}</div>
@@ -264,15 +286,20 @@ export default function ChatPage() {
           <div ref={bottomRef} />
         </div>
 
-        <form onSubmit={e => { e.preventDefault(); sendMessage(input); }} className="flex gap-2 pt-2 border-t border-gray-200 dark:border-gray-800">
+        <form
+          onSubmit={e => { e.preventDefault(); sendMessage(input); }}
+          className="flex gap-2 pt-2 pb-1 shrink-0 border-t border-gray-200 dark:border-gray-800 bg-gray-50/95 dark:bg-surface-dark/95 backdrop-blur sticky bottom-0"
+        >
           <input
-            className="input flex-1"
+            className="input flex-1 text-base"
             value={input}
             onChange={e => setInput(e.target.value)}
-            placeholder='Log: "I ate 250g chicken and rice" or ask anything...'
+            placeholder="Log a meal or ask anything..."
             disabled={loading}
+            enterKeyHint="send"
+            autoComplete="off"
           />
-          <button type="submit" disabled={loading || !input.trim()} className="btn-primary px-4">
+          <button type="submit" disabled={loading || !input.trim()} className="btn-primary px-4 shrink-0" aria-label="Send message">
             <Send className="w-5 h-5" />
           </button>
         </form>

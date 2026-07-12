@@ -54,7 +54,7 @@ export function StatCard({ title, value, subtitle, icon, trend, trendValue, clas
         <span className="text-sm text-gray-500 dark:text-gray-400">{title}</span>
         {icon && <span className="text-brand-500">{icon}</span>}
       </div>
-      <div className="text-2xl font-bold">{value}</div>
+      <div className="text-xl sm:text-2xl font-bold truncate">{value}</div>
       {(subtitle || trendValue) && (
         <div className="flex items-center gap-2 mt-1">
           {trendValue && (
