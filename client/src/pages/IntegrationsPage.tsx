@@ -1,6 +1,6 @@
 import { useEffect, useState, useCallback } from 'react';
 import { useSearchParams } from 'react-router-dom';
-import { RefreshCw, Check, X, Link2, Unlink, Upload, ChevronDown, ChevronUp, AlertCircle } from 'lucide-react';
+import { RefreshCw, Check, X, Link2, Unlink, Upload, ChevronDown, ChevronUp, AlertCircle, Copy } from 'lucide-react';
 import { api } from '../services/api';
 import { LoadingSpinner } from '../components/ui';
 
@@ -34,6 +34,15 @@ export default function IntegrationsPage() {
   const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
   const [whoopStats, setWhoopStats] = useState<Record<string, unknown> | null>(null);
   const [searchParams, setSearchParams] = useSearchParams();
+
+  const [copiedRedirect, setCopiedRedirect] = useState(false);
+
+  const copyRedirectUri = async () => {
+    if (!oauthCallbackUrl) return;
+    await navigator.clipboard.writeText(oauthCallbackUrl);
+    setCopiedRedirect(true);
+    setTimeout(() => setCopiedRedirect(false), 2000);
+  };
 
   const load = useCallback(() => {
     Promise.all([api.integrations.list(), api.integrations.getProviders()])
@@ -247,12 +256,25 @@ export default function IntegrationsPage() {
                   )}
                 </p>
               )}
-              {!getStatus('whoop')?.connected && oauthCallbackUrl && (
-                <p className="text-xs text-gray-500 mt-2">
-                  Ensure this redirect URI is registered in your{' '}
-                  <a href="https://developer-dashboard.whoop.com" className="text-brand-500 hover:underline" target="_blank" rel="noreferrer">WHOOP Developer Dashboard</a>:
-                  <code className="block mt-1 p-2 bg-white dark:bg-gray-800 rounded text-xs break-all">{oauthCallbackUrl}</code>
-                </p>
+              {oauthCallbackUrl && (
+                <div className="mt-3 p-3 rounded-xl bg-white dark:bg-gray-800 border border-brand-500/20">
+                  <p className="text-xs font-medium text-gray-700 dark:text-gray-300 mb-2">
+                    Step 1 — Add this <strong>exact</strong> Redirect URI in the{' '}
+                    <a href="https://developer-dashboard.whoop.com" className="text-brand-500 hover:underline" target="_blank" rel="noreferrer">WHOOP Developer Dashboard</a>:
+                  </p>
+                  <div className="flex gap-2 items-start">
+                    <code className="flex-1 p-2 bg-gray-50 dark:bg-gray-900 rounded text-xs break-all">{oauthCallbackUrl}</code>
+                    <button type="button" onClick={copyRedirectUri} className="btn-secondary text-xs px-3 shrink-0">
+                      {copiedRedirect ? <Check className="w-4 h-4" /> : <Copy className="w-4 h-4" />}
+                    </button>
+                  </div>
+                  <ul className="mt-2 text-xs text-gray-500 space-y-1 list-disc pl-4">
+                    <li>Port <strong>3001</strong> (API), not 5173 (web UI)</li>
+                    <li>Use <strong>localhost</strong>, not 127.0.0.1</li>
+                    <li>No trailing slash</li>
+                    <li>Must match exactly — then restart server and click Connect</li>
+                  </ul>
+                </div>
               )}
             </div>
             {!getStatus('whoop')?.connected ? (

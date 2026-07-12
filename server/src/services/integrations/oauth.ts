@@ -1,5 +1,34 @@
 import jwt from 'jsonwebtoken';
+import crypto from 'crypto';
 import { env, OAUTH_CALLBACK } from '../../config/env.js';
+
+/** WHOOP requires state to be 8 characters when self-generated */
+const pendingOAuthStates = new Map<string, { userId: string; provider: string; expires: number }>();
+
+function pruneExpiredStates() {
+  const now = Date.now();
+  for (const [key, value] of pendingOAuthStates) {
+    if (value.expires < now) pendingOAuthStates.delete(key);
+  }
+}
+
+function createWhoopState(userId: string, provider: string): string {
+  pruneExpiredStates();
+  let state = crypto.randomBytes(4).toString('hex');
+  while (pendingOAuthStates.has(state)) {
+    state = crypto.randomBytes(4).toString('hex');
+  }
+  pendingOAuthStates.set(state, { userId, provider, expires: Date.now() + 10 * 60 * 1000 });
+  return state;
+}
+
+function verifyWhoopState(state: string): { userId: string; provider: string } {
+  pruneExpiredStates();
+  const entry = pendingOAuthStates.get(state);
+  if (!entry) throw new Error('Invalid or expired OAuth state');
+  pendingOAuthStates.delete(state);
+  return { userId: entry.userId, provider: entry.provider };
+}
 
 export interface OAuthProviderConfig {
   provider: string;
@@ -101,6 +130,9 @@ export function createOAuthState(userId: string, provider: string): string {
 }
 
 export function verifyOAuthState(state: string): { userId: string; provider: string } {
+  if (/^[a-f0-9]{8}$/.test(state)) {
+    return verifyWhoopState(state);
+  }
   const payload = jwt.verify(state, env.JWT_SECRET) as { userId: string; provider: string; type: string };
   if (payload.type !== 'oauth') throw new Error('Invalid OAuth state');
   return { userId: payload.userId, provider: payload.provider };
@@ -110,7 +142,9 @@ export function getAuthorizationUrl(provider: string, userId: string): string {
   const config = getProviderConfig(provider);
   if (!config?.clientId) throw new Error(`OAuth not configured for ${provider}. Add client ID/secret to .env or use manual token.`);
 
-  const state = createOAuthState(userId, provider);
+  const state = provider === 'whoop'
+    ? createWhoopState(userId, provider)
+    : createOAuthState(userId, provider);
   const params = new URLSearchParams({
     client_id: config.clientId,
     redirect_uri: OAUTH_CALLBACK,

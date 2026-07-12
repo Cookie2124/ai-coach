@@ -11,6 +11,8 @@ export const env = {
   JWT_SECRET: process.env.JWT_SECRET || 'aicoach-local-dev-secret',
   APP_URL: process.env.APP_URL || 'http://localhost:3001',
   CLIENT_URL: process.env.CLIENT_URL || 'http://localhost:5173',
+  /** Override OAuth callback if WHOOP dashboard uses a different URI than APP_URL */
+  OAUTH_REDIRECT_URI: process.env.OAUTH_REDIRECT_URI || '',
 
   OPENROUTER_API_KEY: process.env.OPENROUTER_API_KEY || '',
   OPENROUTER_MODEL: process.env.OPENROUTER_MODEL || 'openai/gpt-5.6-luna',
@@ -31,4 +33,4 @@ export const env = {
   GARMIN_CLIENT_SECRET: process.env.GARMIN_CLIENT_SECRET || '',
 };
 
-export const OAUTH_CALLBACK = `${env.APP_URL}/api/integrations/oauth/callback`;
+export const OAUTH_CALLBACK = env.OAUTH_REDIRECT_URI || `${env.APP_URL}/api/integrations/oauth/callback`;

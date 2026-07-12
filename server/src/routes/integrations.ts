@@ -69,6 +69,18 @@ router.get('/providers', (_req, res) => {
     providers: PROVIDER_INFO,
     oauthAvailable: getOAuthAvailability(),
     oauthCallbackUrl: getOAuthCallbackUrl(),
+    oauthSetup: {
+      whoop: {
+        redirectUri: getOAuthCallbackUrl(),
+        dashboardUrl: 'https://developer-dashboard.whoop.com',
+        hints: [
+          'Register the redirect URI exactly — character for character, including http vs https',
+          'Use localhost, not 127.0.0.1 (they are different to OAuth)',
+          'Port must be 3001 (API server), not 5173 (Vite dev UI)',
+          'No trailing slash at the end',
+        ],
+      },
+    },
   });
 });
 
