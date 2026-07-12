@@ -1,0 +1,22 @@
+---
+description: Auto-commit and push code changes to GitHub after agent work
+alwaysApply: true
+---
+
+# Auto Git Sync
+
+This project auto-pushes to `https://github.com/Cookie2124/ai-coach` via a Cursor **stop hook** (`.cursor/hooks/auto-push.mjs`).
+
+When you finish making code changes in this repo:
+
+1. Do **not** manually commit or push unless the user explicitly asks for a custom commit message or branch.
+2. Ensure `.env` and other secrets stay out of git (never stage `.env`).
+3. Leave the working tree with intentional changes only — the stop hook commits and pushes to `origin/main` when the agent session ends.
+
+If the user asks to push immediately (before the session ends), run:
+
+```powershell
+git add -A
+git -c user.email="Cookie2124@users.noreply.github.com" -c user.name="Cookie2124" commit -m "your message"
+git push origin main
+```
