@@ -17,10 +17,13 @@ import { runLearningCycle } from '../services/learning/index.js';
 const router = Router();
 
 router.get('/oauth/callback', async (req: Request, res: Response) => {
-  const fallbackClient = env.CLIENT_URL;
+  const fallbackClient = env.CLIENT_URL.replace(/\/$/, '');
   try {
-    const { code, state, error } = req.query;
-    if (error) return res.redirect(`${fallbackClient}/integrations?error=${encodeURIComponent(String(error))}`);
+    const { code, state, error, error_description } = req.query;
+    if (error) {
+      const detail = error_description ? `${error}: ${error_description}` : String(error);
+      return res.redirect(`${fallbackClient}/integrations?error=${encodeURIComponent(detail)}`);
+    }
     if (!code || !state) return res.redirect(`${fallbackClient}/integrations?error=missing_params`);
 
     const oauthCtx = verifyOAuthState(String(state));
@@ -110,7 +113,9 @@ router.get('/:provider/connect', (req: AuthRequest, res) => {
     }
     const clientUrl = typeof req.query.client_url === 'string' ? req.query.client_url : undefined;
     const url = getAuthorizationUrl(provider, req.userId!, clientUrl);
-    res.json({ url, redirectUri: getOAuthCallbackUrl(clientUrl) });
+    const { redirectUri } = resolveOAuthUrls(clientUrl);
+    console.log(`[oauth] ${provider} connect redirect_uri=${redirectUri} client=${clientUrl ?? 'default'}`);
+    res.json({ url, redirectUri });
   } catch (error) {
     res.status(400).json({ error: (error as Error).message });
   }

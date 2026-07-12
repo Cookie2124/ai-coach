@@ -1,5 +1,6 @@
 import jwt from 'jsonwebtoken';
 import crypto from 'crypto';
+import { db } from '../../db/database.js';
 import { env, OAUTH_CALLBACK, resolveOAuthUrls } from '../../config/env.js';
 
 export interface OAuthContext {
@@ -9,37 +10,51 @@ export interface OAuthContext {
   clientUrl: string;
 }
 
-/** WHOOP requires state to be 8 characters when self-generated */
-const pendingOAuthStates = new Map<string, OAuthContext & { expires: number }>();
+function pruneExpiredOAuthStates() {
+  db.prepare(`DELETE FROM oauth_pending_states WHERE expires_at < datetime('now')`).run();
+}
 
-function pruneExpiredStates() {
-  const now = Date.now();
-  for (const [key, value] of pendingOAuthStates) {
-    if (value.expires < now) pendingOAuthStates.delete(key);
-  }
+function saveOAuthState(state: string, ctx: OAuthContext) {
+  pruneExpiredOAuthStates();
+  db.prepare(`
+    INSERT INTO oauth_pending_states (state, user_id, provider, redirect_uri, client_url, expires_at)
+    VALUES (?, ?, ?, ?, ?, datetime('now', '+10 minutes'))
+  `).run(state, ctx.userId, ctx.provider, ctx.redirectUri, ctx.clientUrl);
+}
+
+function loadOAuthState(state: string): OAuthContext | null {
+  pruneExpiredOAuthStates();
+  const row = db.prepare(`
+    SELECT user_id, provider, redirect_uri, client_url FROM oauth_pending_states
+    WHERE state = ? AND expires_at >= datetime('now')
+  `).get(state) as { user_id: string; provider: string; redirect_uri: string; client_url: string } | undefined;
+  if (!row) return null;
+  db.prepare(`DELETE FROM oauth_pending_states WHERE state = ?`).run(state);
+  return {
+    userId: row.user_id,
+    provider: row.provider,
+    redirectUri: row.redirect_uri,
+    clientUrl: row.client_url,
+  };
+}
+
+function oauthStateExists(state: string): boolean {
+  return !!db.prepare(`SELECT 1 FROM oauth_pending_states WHERE state = ?`).get(state);
 }
 
 function createWhoopState(ctx: OAuthContext): string {
-  pruneExpiredStates();
   let state = crypto.randomBytes(4).toString('hex');
-  while (pendingOAuthStates.has(state)) {
+  while (oauthStateExists(state)) {
     state = crypto.randomBytes(4).toString('hex');
   }
-  pendingOAuthStates.set(state, { ...ctx, expires: Date.now() + 10 * 60 * 1000 });
+  saveOAuthState(state, ctx);
   return state;
 }
 
 function verifyWhoopState(state: string): OAuthContext {
-  pruneExpiredStates();
-  const entry = pendingOAuthStates.get(state);
-  if (!entry) throw new Error('Invalid or expired OAuth state');
-  pendingOAuthStates.delete(state);
-  return {
-    userId: entry.userId,
-    provider: entry.provider,
-    redirectUri: entry.redirectUri,
-    clientUrl: entry.clientUrl,
-  };
+  const ctx = loadOAuthState(state);
+  if (!ctx) throw new Error('Invalid or expired OAuth state — try Connect WHOOP again');
+  return ctx;
 }
 
 export interface OAuthProviderConfig {
@@ -188,22 +203,35 @@ export async function exchangeCodeForTokens(provider: string, code: string, redi
   const config = getProviderConfig(provider);
   if (!config) throw new Error(`Unknown provider: ${provider}`);
 
-  const body = new URLSearchParams({
+  const bodyParams: Record<string, string> = {
     grant_type: 'authorization_code',
     code,
     redirect_uri: redirectUri,
     client_id: config.clientId,
     client_secret: config.clientSecret,
-  });
+  };
+
+  if (provider === 'whoop') {
+    bodyParams.scope = 'offline';
+  }
 
   const response = await fetch(config.tokenUrl, {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body,
+    body: new URLSearchParams(bodyParams),
   });
   if (!response.ok) {
     const err = await response.text();
-    throw new Error(`Token exchange failed: ${err}`);
+    let message = err;
+    try {
+      const parsed = JSON.parse(err) as { error?: string; error_description?: string };
+      if (parsed.error === 'invalid_request' && parsed.error_description?.includes('redirect_uri')) {
+        message = `WHOOP redirect URI mismatch. Register this exact URL in the WHOOP Developer Dashboard: ${redirectUri}`;
+      } else if (parsed.error_description) {
+        message = `${parsed.error}: ${parsed.error_description}`;
+      }
+    } catch { /* use raw err */ }
+    throw new Error(`Token exchange failed: ${message}`);
   }
 
   const data = await response.json() as Record<string, unknown>;

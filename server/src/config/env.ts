@@ -52,7 +52,8 @@ export function resolveOAuthUrls(clientUrl?: string) {
     }
     const apiPort = env.PORT || '3001';
     const appUrl = `${client.protocol}//${client.hostname}:${apiPort}`;
-    const redirectUri = env.OAUTH_REDIRECT_URI || `${appUrl}/api/integrations/oauth/callback`;
+    // Always derive callback from how the user opened the app (ignore OAUTH_REDIRECT_URI override)
+    const redirectUri = `${appUrl}/api/integrations/oauth/callback`;
     return {
       clientUrl: client.origin,
       appUrl,

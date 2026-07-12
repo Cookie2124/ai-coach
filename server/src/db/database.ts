@@ -353,6 +353,15 @@ export function initializeDatabase() {
       updated_at TEXT DEFAULT (datetime('now'))
     );
 
+    CREATE TABLE IF NOT EXISTS oauth_pending_states (
+      state TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL,
+      provider TEXT NOT NULL,
+      redirect_uri TEXT NOT NULL,
+      client_url TEXT NOT NULL,
+      expires_at TEXT NOT NULL
+    );
+
     -- Indexes
     CREATE INDEX IF NOT EXISTS idx_recovery_user_date ON recovery_entries(user_id, date);
     CREATE INDEX IF NOT EXISTS idx_sleep_user_date ON sleep_entries(user_id, date);
