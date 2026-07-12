@@ -87,6 +87,25 @@ export default function IntegrationsPage() {
 
   const isGoogleConnected = () => ['google', 'google_calendar', 'gmail'].some(p => getStatus(p)?.connected);
 
+  const isIpHostname = /^(\d{1,3}\.){3}\d{1,3}$/.test(window.location.hostname);
+  const appPort = window.location.port || '3001';
+  const googleLocalRedirect = `http://localhost:${appPort}/api/integrations/oauth/callback`;
+  const google127Redirect = `http://127.0.0.1:${appPort}/api/integrations/oauth/callback`;
+
+  const handleGoogleConnect = () => {
+    if (isIpHostname) {
+      setMessage({
+        type: 'error',
+        text: `Google does not allow IP addresses (like ${window.location.hostname}) as OAuth redirect URLs. `
+          + `Use SSH tunnel: ssh -L ${appPort}:localhost:${appPort} pi@${window.location.hostname} `
+          + `then open http://localhost:${appPort}/integrations on your computer and connect Google there. `
+          + `Once connected, Calendar/Gmail sync works from your phone too.`,
+      });
+      return;
+    }
+    handleOAuthConnect('google');
+  };
+
   const handleOAuthConnect = async (provider: string) => {
     try {
       const { url } = await api.integrations.connect(provider, window.location.origin);
@@ -212,21 +231,37 @@ export default function IntegrationsPage() {
               <p className="text-sm text-gray-600 dark:text-gray-300 mt-1">
                 One click connects <strong>Calendar + Gmail</strong>. Events, exams, matches, and emails sync automatically — AiCoach learns your schedule and personalizes advice.
               </p>
-              {!isGoogleConnected() && oauthCallbackUrl && (
-                <details className="text-xs text-gray-500 mt-2">
-                  <summary className="cursor-pointer text-brand-500">Google Cloud setup (one-time)</summary>
-                  <ol className="list-decimal list-inside mt-2 space-y-1">
-                    <li>Go to <a href="https://console.cloud.google.com/apis/credentials" className="text-brand-500 underline" target="_blank" rel="noreferrer">Google Cloud Console</a></li>
-                    <li>Create OAuth 2.0 credentials (Web application)</li>
-                    <li>Enable <strong>Google Calendar API</strong> and <strong>Gmail API</strong></li>
-                    <li>Add redirect URI: <code className="block mt-1 p-2 bg-white dark:bg-gray-800 rounded break-all">{oauthCallbackUrl}</code></li>
-                    <li>Add <code>GOOGLE_CLIENT_ID</code> and <code>GOOGLE_CLIENT_SECRET</code> to your <code>.env</code></li>
-                  </ol>
-                </details>
+              {!isGoogleConnected() && (
+                <div className="mt-3 space-y-2">
+                  {isIpHostname && (
+                    <div className="p-3 rounded-xl bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800 text-xs text-amber-800 dark:text-amber-200">
+                      <strong>Google blocks IP redirect URLs</strong> (including Tailscale <code>100.x.x.x</code>).
+                      Register <strong>localhost only</strong> in Google Cloud, then connect via one of:
+                      <ul className="list-disc pl-4 mt-1 space-y-1">
+                        <li>Browser on the Pi: <code>http://localhost:{appPort}/integrations</code></li>
+                        <li>SSH tunnel from PC: <code>ssh -L {appPort}:localhost:{appPort} pi@{window.location.hostname}</code> then open <code>http://localhost:{appPort}/integrations</code></li>
+                      </ul>
+                      After connecting once, sync works from your phone.
+                    </div>
+                  )}
+                  <details className="text-xs text-gray-500">
+                    <summary className="cursor-pointer text-brand-500">Google Cloud setup (one-time)</summary>
+                    <ol className="list-decimal list-inside mt-2 space-y-1">
+                      <li>Go to <a href="https://console.cloud.google.com/apis/credentials" className="text-brand-500 underline" target="_blank" rel="noreferrer">Google Cloud Console</a></li>
+                      <li>Create OAuth 2.0 credentials (Web application)</li>
+                      <li>Enable <strong>Google Calendar API</strong> and <strong>Gmail API</strong></li>
+                      <li>Add these redirect URIs (Google does <strong>not</strong> allow raw IPs):
+                        <code className="block mt-1 p-2 bg-white dark:bg-gray-800 rounded break-all">{googleLocalRedirect}</code>
+                        <code className="block mt-1 p-2 bg-white dark:bg-gray-800 rounded break-all">{google127Redirect}</code>
+                      </li>
+                      <li>Add <code>GOOGLE_CLIENT_ID</code> and <code>GOOGLE_CLIENT_SECRET</code> to your <code>.env</code></li>
+                    </ol>
+                  </details>
+                </div>
               )}
             </div>
             {!isGoogleConnected() ? (
-              <button onClick={() => handleOAuthConnect('google')} className="btn-primary flex items-center gap-2 self-start px-6 py-3 text-base bg-blue-600 hover:bg-blue-700">
+              <button onClick={handleGoogleConnect} className="btn-primary flex items-center gap-2 self-start px-6 py-3 text-base bg-blue-600 hover:bg-blue-700">
                 <Link2 className="w-5 h-5" /> Connect Google Account
               </button>
             ) : (
