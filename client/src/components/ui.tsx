@@ -2,7 +2,7 @@ import { ReactNode } from 'react';
 import clsx from 'clsx';
 
 interface ScoreRingProps {
-  value: number;
+  value?: number | null;
   max?: number;
   size?: number;
   label: string;
@@ -11,12 +11,13 @@ interface ScoreRingProps {
 }
 
 export function ScoreRing({ value, max = 100, size = 120, label, color, sublabel }: ScoreRingProps) {
-  const pct = Math.min(100, (value / max) * 100);
+  const empty = value == null;
+  const pct = empty ? 0 : Math.min(100, (value / max) * 100);
   const radius = (size - 12) / 2;
   const circumference = 2 * Math.PI * radius;
   const offset = circumference - (pct / 100) * circumference;
 
-  const strokeColor = color || (pct >= 67 ? '#22c55e' : pct >= 34 ? '#eab308' : '#ef4444');
+  const strokeColor = empty ? '#9ca3af' : (color || (pct >= 67 ? '#22c55e' : pct >= 34 ? '#eab308' : '#ef4444'));
 
   return (
     <div className="flex flex-col items-center gap-2">
@@ -27,7 +28,7 @@ export function ScoreRing({ value, max = 100, size = 120, label, color, sublabel
             strokeDasharray={circumference} strokeDashoffset={offset} strokeLinecap="round" className="transition-all duration-700" />
         </svg>
         <div className="absolute inset-0 flex flex-col items-center justify-center">
-          <span className="text-2xl font-bold">{Math.round(value)}</span>
+          <span className="text-2xl font-bold">{empty ? '--' : Math.round(value)}</span>
           {sublabel && <span className="text-xs text-gray-500">{sublabel}</span>}
         </div>
       </div>

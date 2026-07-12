@@ -1,18 +1,37 @@
 import { useEffect, useState } from 'react';
-import { Plus, Trash2 } from 'lucide-react';
+import { Plus, Trash2, Brain } from 'lucide-react';
 import { api } from '../services/api';
 import { LoadingSpinner } from '../components/ui';
+
+const AI_MODELS = [
+  'openai/gpt-5.6-luna',
+  'openai/gpt-5.6-luna-pro',
+  'openai/gpt-4o-mini',
+  'openai/gpt-4o',
+  'anthropic/claude-3.5-sonnet',
+  'google/gemini-2.0-flash-001',
+  'meta-llama/llama-3.3-70b-instruct',
+  'deepseek/deepseek-chat',
+];
 
 export default function SettingsPage() {
   const [profile, setProfile] = useState<Record<string, unknown>>({});
   const [memories, setMemories] = useState<Record<string, unknown>[]>([]);
+  const [aiConfig, setAiConfig] = useState<{ configured: boolean; model: string; source: string } | null>(null);
+  const [aiKey, setAiKey] = useState('');
+  const [aiModel, setAiModel] = useState('openai/gpt-5.6-luna');
   const [loading, setLoading] = useState(true);
   const [saved, setSaved] = useState(false);
   const [newMemory, setNewMemory] = useState({ category: 'general', key: '', value: '' });
 
   useEffect(() => {
-    Promise.all([api.auth.me(), api.ai.getMemories()])
-      .then(([{ profile: p }, m]) => { setProfile(p || {}); setMemories(m as Record<string, unknown>[]); })
+    Promise.all([api.auth.me(), api.ai.getMemories(), api.aiConfig.get()])
+      .then(([{ profile: p }, m, ai]) => {
+        setProfile(p || {});
+        setMemories(m as Record<string, unknown>[]);
+        setAiConfig(ai);
+        setAiModel(ai.model);
+      })
       .finally(() => setLoading(false));
   }, []);
 
@@ -28,6 +47,17 @@ export default function SettingsPage() {
     setNewMemory({ category: 'general', key: '', value: '' });
     const m = await api.ai.getMemories();
     setMemories(m as Record<string, unknown>[]);
+  };
+
+  const saveAIConfig = async () => {
+    const result = await api.aiConfig.update({
+      ...(aiKey && { apiKey: aiKey }),
+      model: aiModel,
+    });
+    setAiConfig(result as typeof aiConfig);
+    setAiKey('');
+    setSaved(true);
+    setTimeout(() => setSaved(false), 2000);
   };
 
   const deleteMemory = async (id: string) => {
@@ -86,8 +116,33 @@ export default function SettingsPage() {
       </div>
 
       <div className="card p-4 md:p-6 space-y-4">
+        <h2 className="font-semibold text-lg flex items-center gap-2"><Brain className="w-5 h-5 text-brand-500" /> AI (OpenRouter)</h2>
+        <p className="text-sm text-gray-500">
+          Powered by OpenRouter. {aiConfig?.configured
+            ? `Configured via ${aiConfig.source === 'env' ? '.env file' : 'your settings'}. Preferred model: ${aiConfig.model}`
+            : 'Add your API key below or set OPENROUTER_API_KEY in .env'}
+        </p>
+        <p className="text-xs text-amber-600 dark:text-amber-400">
+          Paid models (e.g. gpt-5.6-luna) require OpenRouter credits. If credits are unavailable, free models are tried automatically.
+        </p>
+        <div className="grid sm:grid-cols-2 gap-3">
+          <div>
+            <label className="text-sm font-medium">API Key (optional override)</label>
+            <input className="input mt-1" type="password" placeholder="sk-or-v1-..." value={aiKey} onChange={e => setAiKey(e.target.value)} />
+          </div>
+          <div>
+            <label className="text-sm font-medium">Model</label>
+            <select className="input mt-1" value={aiModel} onChange={e => setAiModel(e.target.value)}>
+              {AI_MODELS.map(m => <option key={m} value={m}>{m}</option>)}
+            </select>
+          </div>
+        </div>
+        <button onClick={saveAIConfig} className="btn-primary">{saved ? 'Saved!' : 'Save AI Settings'}</button>
+      </div>
+
+      <div className="card p-4 md:p-6 space-y-4">
         <h2 className="font-semibold text-lg">AI Memories</h2>
-        <p className="text-sm text-gray-500">Stored facts the AI uses for personalized recommendations. View, edit, and delete anytime.</p>
+        <p className="text-sm text-gray-500">Facts the AI uses for personalized recommendations. Auto-learned memories are discovered from your chat, schedule, and behavior — you can override them by adding your own.</p>
 
         <div className="flex gap-2 flex-wrap">
           <input className="input flex-1 min-w-[120px]" placeholder="Category" value={newMemory.category} onChange={e => setNewMemory({ ...newMemory, category: e.target.value })} />
@@ -103,7 +158,12 @@ export default function SettingsPage() {
             {memories.map(m => (
               <div key={m.id as string} className="flex items-center justify-between p-3 rounded-xl bg-gray-50 dark:bg-gray-800">
                 <div>
-                  <span className="text-xs text-brand-500 font-medium">{m.category as string}</span>
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs text-brand-500 font-medium">{m.category as string}</span>
+                    {(m.source as string) === 'auto' && (
+                      <span className="text-xs px-1.5 py-0.5 rounded-full bg-purple-100 text-purple-600 dark:bg-purple-900/30 dark:text-purple-400">Auto-learned</span>
+                    )}
+                  </div>
                   <p className="text-sm font-medium">{m.key as string}: {m.value as string}</p>
                 </div>
                 <button onClick={() => deleteMemory(m.id as string)} className="text-red-400 hover:text-red-500">
@@ -117,7 +177,7 @@ export default function SettingsPage() {
 
       <div className="card p-4 text-sm text-gray-500">
         <p><strong>Local-first:</strong> All data is stored in SQLite on your machine at <code className="text-xs bg-gray-100 dark:bg-gray-800 px-1 rounded">./data/aicoach.db</code></p>
-        <p className="mt-2"><strong>AI:</strong> Connect Ollama at localhost:11434 for full AI capabilities. Works offline with rule-based fallback.</p>
+        <p className="mt-2"><strong>AI:</strong> Uses OpenRouter for cloud AI with full access to all your interconnected data. API key stored locally in .env or settings.</p>
       </div>
     </div>
   );

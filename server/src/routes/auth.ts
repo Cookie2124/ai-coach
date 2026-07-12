@@ -3,6 +3,7 @@ import bcrypt from 'bcryptjs';
 import { db } from '../db/database.js';
 import { generateId } from '../types/index.js';
 import { signToken, authMiddleware, type AuthRequest } from '../middleware/auth.js';
+import { getEffectiveTargets, parseProfileRow } from '../services/analytics/profile.js';
 
 const router = Router();
 
@@ -34,8 +35,10 @@ router.post('/login', (req, res) => {
 
 router.get('/me', authMiddleware, (req: AuthRequest, res) => {
   const user = db.prepare(`SELECT id, email, name FROM users WHERE id = ?`).get(req.userId!);
-  const profile = db.prepare(`SELECT * FROM user_profile WHERE user_id = ?`).get(req.userId!);
-  res.json({ user, profile });
+  const profileRow = db.prepare(`SELECT * FROM user_profile WHERE user_id = ?`).get(req.userId!) as Record<string, unknown> | undefined;
+  const profile = parseProfileRow(profileRow);
+  const targets = getEffectiveTargets(req.userId!);
+  res.json({ user, profile: profile ? { ...profile, targets } : { targets } });
 });
 
 router.put('/profile', authMiddleware, (req: AuthRequest, res) => {

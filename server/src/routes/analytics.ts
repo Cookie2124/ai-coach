@@ -3,19 +3,52 @@ import { db } from '../db/database.js';
 import { generateId, daysAgo, today, estimate1RM } from '../types/index.js';
 import { authMiddleware, type AuthRequest } from '../middleware/auth.js';
 import { buildUnifiedContext, getNutritionAnalytics, getRecoveryAnalytics, getTrainingLoad, getStrengthAnalytics, getWeightTrend } from '../services/analytics/index.js';
+import { getDashboardSummary } from '../services/analytics/summary.js';
+import { sanitizeRecoveryEntry, sanitizeSleepEntry } from '../utils/format.js';
+import { autoSyncIfStale } from '../services/integrations/auto-sync.js';
+import { runLearningCycle } from '../services/learning/index.js';
 import { runCorrelationEngine, generateInsightsFromCorrelations } from '../services/correlation/index.js';
 import { runAllPredictions } from '../services/predictions/index.js';
 
 const router = Router();
 router.use(authMiddleware);
 
-router.get('/dashboard', (req: AuthRequest, res) => {
+router.get('/dashboard', async (req: AuthRequest, res) => {
   const userId = req.userId!;
+
+  // Background sync + learning (non-blocking feel — runs if stale)
+  autoSyncIfStale(userId).catch(err => console.warn('Auto-sync:', err.message));
+
   runCorrelationEngine(userId);
   generateInsightsFromCorrelations(userId);
+  const learning = runLearningCycle(userId);
   const context = buildUnifiedContext(userId);
   const predictions = runAllPredictions(userId);
-  res.json({ ...context, predictions });
+  const nutritionAnalytics = getNutritionAnalytics(userId);
+  const dataAvailability = {
+    hasRecovery: context.recovery.length > 0,
+    hasSleep: context.sleep.length > 0,
+    hasNutrition: context.nutrition.today.mealCount > 0,
+    hasWorkouts: context.workouts.length > 0,
+    hasWeight: !!context.latestWeight,
+    hasScores: Object.keys(context.scores).length > 0,
+  };
+  const summary = getDashboardSummary(userId);
+
+  const recovery = context.recovery.map(r => sanitizeRecoveryEntry(r as unknown as Record<string, unknown>));
+  const sleep = context.sleep.map(s => sanitizeSleepEntry(s as unknown as Record<string, unknown>));
+
+  res.json({
+    ...context,
+    recovery,
+    sleep,
+    predictions,
+    nutritionAnalytics,
+    targets: nutritionAnalytics.targets,
+    dataAvailability,
+    summary,
+    learning,
+  });
 });
 
 router.get('/nutrition', (req: AuthRequest, res) => {

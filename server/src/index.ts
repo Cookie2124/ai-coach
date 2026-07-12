@@ -1,3 +1,4 @@
+import './config/env.js';
 import express from 'express';
 import cors from 'cors';
 import path from 'path';
@@ -8,6 +9,7 @@ import analyticsRoutes from './routes/analytics.js';
 import dataRoutes from './routes/data.js';
 import aiRoutes from './routes/ai.js';
 import integrationRoutes from './routes/integrations.js';
+import learningRoutes from './routes/learning.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = process.env.PORT || 3001;
@@ -23,6 +25,7 @@ app.use('/api/analytics', analyticsRoutes);
 app.use('/api/data', dataRoutes);
 app.use('/api/ai', aiRoutes);
 app.use('/api/integrations', integrationRoutes);
+app.use('/api/learning', learningRoutes);
 
 app.get('/api/health', (_req, res) => {
   res.json({ status: 'ok', version: '1.0.0', local: true });

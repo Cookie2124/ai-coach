@@ -2,7 +2,7 @@ import { Router } from 'express';
 import { db } from '../db/database.js';
 import { generateId, estimate1RM } from '../types/index.js';
 import { authMiddleware, type AuthRequest } from '../middleware/auth.js';
-import { estimateMealNutrition } from '../services/ai/index.js';
+import { estimateMealNutrition, logMeal } from '../services/nutrition/meals.js';
 
 const router = Router();
 router.use(authMiddleware);
@@ -19,21 +19,13 @@ router.get('/meals', (req: AuthRequest, res) => {
 
 router.post('/meals', (req: AuthRequest, res) => {
   const { description, meal_type, logged_at, calories, protein_g, carbs_g, fat_g, fibre_g } = req.body;
-  const estimated = estimateMealNutrition(description);
-  const id = generateId();
-  db.prepare(`
-    INSERT INTO meals (id, user_id, description, calories, protein_g, carbs_g, fat_g, fibre_g, meal_type, logged_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `).run(id, req.userId!, description,
-    calories ?? estimated.calories, protein_g ?? estimated.protein_g,
-    carbs_g ?? estimated.carbs_g, fat_g ?? estimated.fat_g,
-    fibre_g ?? estimated.fibre_g, meal_type ?? 'other',
-    logged_at ?? new Date().toISOString());
-  res.json({ id, ...estimated });
+  const result = logMeal(req.userId!, description, { meal_type, logged_at, calories, protein_g, carbs_g, fat_g, fibre_g });
+  res.json(result);
 });
 
 router.delete('/meals/:id', (req: AuthRequest, res) => {
-  db.prepare(`DELETE FROM meals WHERE id = ? AND user_id = ?`).run(req.params.id, req.userId!);
+  const result = db.prepare(`DELETE FROM meals WHERE id = ? AND user_id = ?`).run(req.params.id, req.userId!);
+  if (result.changes === 0) return res.status(404).json({ error: 'Meal not found' });
   res.json({ success: true });
 });
 

@@ -1,182 +1,243 @@
 import { db } from '../../db/database.js';
 import { generateId } from '../../types/index.js';
 import { buildUnifiedContext } from '../analytics/index.js';
+import { getEffectiveTargets } from '../analytics/profile.js';
 import { generateRecommendations } from '../predictions/index.js';
+import { env } from '../../config/env.js';
+import { fmtSleepHours, round } from '../../utils/format.js';
+import { getCredentials, saveIntegration } from '../integrations/base.js';
+import { learnFromChatMessage, runLearningCycle } from '../learning/index.js';
+import {
+  estimateMealNutrition,
+  logMeal,
+  isMealLogIntent,
+  logWeightFromChat,
+  isWeightLogIntent,
+  deleteMealsFromChat,
+  isMealDeleteIntent,
+} from '../nutrition/meals.js';
 
-const OLLAMA_URL = process.env.OLLAMA_URL || 'http://localhost:11434';
-const OLLAMA_MODEL = process.env.OLLAMA_MODEL || 'llama3.2';
+const OPENROUTER_URL = 'https://openrouter.ai/api/v1/chat/completions';
+const MODEL_FALLBACKS = [
+  'openai/gpt-5.6-luna',
+  'openai/gpt-4o-mini',
+  'google/gemini-2.0-flash-exp:free',
+  'meta-llama/llama-3.2-3b-instruct:free',
+  'qwen/qwen-2.5-72b-instruct:free',
+  'openrouter/free',
+];
 
-const FOOD_DB: Record<string, { calories: number; protein: number; carbs: number; fat: number; fibre: number; unit: string }> = {
-  'weet-bix': { calories: 33, protein: 1.2, carbs: 6.5, fat: 0.3, fibre: 1.5, unit: 'biscuit' },
-  'weetbix': { calories: 33, protein: 1.2, carbs: 6.5, fat: 0.3, fibre: 1.5, unit: 'biscuit' },
-  'milk': { calories: 0.64, protein: 0.034, carbs: 0.048, fat: 0.036, fibre: 0, unit: 'ml' },
-  'chicken': { calories: 1.65, protein: 0.31, carbs: 0, fat: 0.036, fibre: 0, unit: 'g' },
-  'rice': { calories: 1.3, protein: 0.027, carbs: 0.28, fat: 0.003, fibre: 0.004, unit: 'g' },
-  'protein shake': { calories: 120, protein: 25, carbs: 3, fat: 1.5, fibre: 0, unit: 'serving' },
-  'protein powder': { calories: 120, protein: 25, carbs: 3, fat: 1.5, fibre: 0, unit: 'scoop' },
-  'egg': { calories: 78, protein: 6.3, carbs: 0.6, fat: 5.3, fibre: 0, unit: 'egg' },
-  'oats': { calories: 3.89, protein: 0.17, carbs: 0.66, fat: 0.07, fibre: 0.1, unit: 'g' },
-  'banana': { calories: 105, protein: 1.3, carbs: 27, fat: 0.4, fibre: 3.1, unit: 'banana' },
-  'bread': { calories: 2.65, protein: 0.09, carbs: 0.49, fat: 0.033, fibre: 0.025, unit: 'g' },
-  'beef': { calories: 2.5, protein: 0.26, carbs: 0, fat: 0.15, fibre: 0, unit: 'g' },
-  'salmon': { calories: 2.08, protein: 0.20, carbs: 0, fat: 0.13, fibre: 0, unit: 'g' },
-  'pasta': { calories: 1.31, protein: 0.05, carbs: 0.25, fat: 0.01, fibre: 0.018, unit: 'g' },
-  'potato': { calories: 0.77, protein: 0.02, carbs: 0.17, fat: 0.001, fibre: 0.022, unit: 'g' },
-  'yogurt': { calories: 0.59, protein: 0.034, carbs: 0.036, fat: 0.034, fibre: 0, unit: 'g' },
-  'peanut butter': { calories: 5.88, protein: 0.25, carbs: 0.20, fat: 0.50, fibre: 0.08, unit: 'g' },
-  'avocado': { calories: 1.6, protein: 0.02, carbs: 0.085, fat: 0.15, fibre: 0.067, unit: 'g' },
-  'broccoli': { calories: 0.34, protein: 0.028, carbs: 0.07, fat: 0.004, fibre: 0.026, unit: 'g' },
-  'cheese': { calories: 4.02, protein: 0.25, carbs: 0.013, fat: 0.33, fibre: 0, unit: 'g' },
+function parseOpenRouterError(status: number, bodyText: string): string {
+  try {
+    const parsed = JSON.parse(bodyText) as { error?: { message?: string } };
+    const msg = parsed.error?.message ?? bodyText.slice(0, 200);
+    if (status === 402) return `Insufficient OpenRouter credits — add credits at openrouter.ai/settings/credits, or the app will try free models. (${msg})`;
+    if (status === 404) return `Model not available: ${msg}`;
+    if (status === 429) return `Rate limited — retry shortly. (${msg})`;
+    return `HTTP ${status}: ${msg}`;
+  } catch {
+    return `HTTP ${status}: ${bodyText.slice(0, 200)}`;
+  }
+}
+
+export type AIResult = {
+  content: string;
+  source: 'openrouter' | 'fallback';
+  model?: string;
+  error?: string;
 };
 
-export function estimateMealNutrition(description: string) {
-  const lower = description.toLowerCase();
-  let calories = 0, protein = 0, carbs = 0, fat = 0, fibre = 0;
-
-  const quantityMatch = lower.match(/(\d+(?:\.\d+)?)\s*(g|kg|ml|l|oz|serving|scoop|egg|banana|biscuit|slice|cup|bowl)?/g);
-
-  for (const [food, nutrition] of Object.entries(FOOD_DB)) {
-    if (lower.includes(food)) {
-      let qty = 1;
-      const foodPattern = new RegExp(`(\\d+(?:\\.\\d+)?)\\s*(g|kg|ml|l|oz|serving|scoop|egg|banana|biscuit|slice|cup|bowl)?\\s*${food}|${food}\\s*(\\d+(?:\\.\\d+)?)?\\s*(g|kg|ml|l)?`, 'i');
-      const match = lower.match(foodPattern);
-
-      if (match) {
-        const num = parseFloat(match[1] || match[3] || '1');
-        const unit = match[2] || match[4] || nutrition.unit;
-        if (unit === 'kg') qty = num * 1000;
-        else if (unit === 'l') qty = num * 1000;
-        else if (unit === 'ml' || unit === 'g') qty = num;
-        else qty = num;
-      } else {
-        const countMatch = lower.match(new RegExp(`(\\d+)\\s*${food}`, 'i'));
-        if (countMatch) qty = parseInt(countMatch[1]);
-      }
-
-      if (nutrition.unit === 'g' || nutrition.unit === 'ml') {
-        calories += nutrition.calories * qty;
-        protein += nutrition.protein * qty;
-        carbs += nutrition.carbs * qty;
-        fat += nutrition.fat * qty;
-        fibre += nutrition.fibre * qty;
-      } else {
-        calories += nutrition.calories * qty;
-        protein += nutrition.protein * qty;
-        carbs += nutrition.carbs * qty;
-        fat += nutrition.fat * qty;
-        fibre += nutrition.fibre * qty;
-      }
-    }
-  }
-
-  if (calories === 0) {
-    calories = 400; protein = 25; carbs = 40; fat = 15; fibre = 3;
-  }
-
+function getAIConfig(userId?: string) {
+  const dbConfig = userId ? getCredentials(userId, 'openrouter') : {};
   return {
-    calories: Math.round(calories),
-    protein_g: Math.round(protein * 10) / 10,
-    carbs_g: Math.round(carbs * 10) / 10,
-    fat_g: Math.round(fat * 10) / 10,
-    fibre_g: Math.round(fibre * 10) / 10,
+    apiKey: (dbConfig.api_key as string) || env.OPENROUTER_API_KEY,
+    model: (dbConfig.model as string) || env.OPENROUTER_MODEL,
   };
 }
 
+export function configureOpenRouter(userId: string, apiKey?: string, model?: string) {
+  const existing = getCredentials(userId, 'openrouter');
+  saveIntegration(userId, 'openrouter', {
+    ...existing,
+    ...(apiKey && { api_key: apiKey }),
+    model: model ?? existing.model ?? env.OPENROUTER_MODEL,
+  }, {}, true);
+}
+
+export function getOpenRouterStatus(userId: string) {
+  const config = getAIConfig(userId);
+  return {
+    configured: !!config.apiKey,
+    model: config.model,
+    source: getCredentials(userId, 'openrouter').api_key ? 'user' : 'env',
+    hint: 'Paid models require OpenRouter credits. Free fallbacks are tried automatically if credits are unavailable.',
+  };
+}
+
+export { estimateMealNutrition } from '../nutrition/meals.js';
+
 function buildSystemPrompt(userId: string): string {
-  const context = buildUnifiedContext(userId);
-  const recs = generateRecommendations(userId);
-  const memories = db.prepare(`SELECT category, key, value FROM memories WHERE user_id = ?`).all(userId) as { category: string; key: string; value: string }[];
+  try {
+    const context = buildUnifiedContext(userId);
+    const targets = getEffectiveTargets(userId);
+    const recs = generateRecommendations(userId);
+    const memories = db.prepare(`SELECT category, key, value, source FROM memories WHERE user_id = ? ORDER BY source DESC, updated_at DESC`).all(userId) as { category: string; key: string; value: string; source: string }[];
+    const userMemories = memories.filter(m => m.source === 'user');
+    const autoMemories = memories.filter(m => m.source === 'auto');
 
-  const latestRecovery = context.recovery[0];
-  const latestSleep = context.sleep[0];
-  const weight = context.latestWeight?.weight_kg ?? 'unknown';
+    const upcomingEvents = (context.calendar.upcoming as { title: string; start_time: string; event_type?: string }[] ?? [])
+      .slice(0, 8)
+      .map(e => `- ${e.start_time?.split('T')[0]}: ${e.title} (${e.event_type ?? 'event'})`)
+      .join('\n');
 
-  return `You are AiCoach, an AI-powered personal operating system for a student athlete. You are their unified coach, nutritionist, recovery specialist, academic planner, and performance analyst.
+    const recentEmails = ((context.calendar as { recentEmails?: { title: string; start_time: string }[] }).recentEmails ?? [])
+      .slice(0, 5)
+      .map(e => `- ${e.start_time?.split('T')[0]}: ${e.title}`)
+      .join('\n');
+
+    const latestRecovery = context.recovery[0] as { recovery_score?: number; hrv_ms?: number; strain?: number } | undefined;
+    const latestSleep = context.sleep[0] as { duration_hours?: number; performance_pct?: number } | undefined;
+    const weight = round(context.latestWeight?.weight_kg as number, 1) ?? 'unknown';
+    const sleepDisplay = latestSleep?.duration_hours != null ? fmtSleepHours(latestSleep.duration_hours) : 'N/A';
+
+    return `You are AiCoach, an AI-powered personal operating system for a student athlete. You are their unified coach, nutritionist, recovery specialist, academic planner, and performance analyst.
 
 CRITICAL: Every recommendation MUST consider ALL available data holistically. Never give advice based on a single metric alone.
 
 ## Current Athlete State
-- Name/Sport: ${context.profile?.sport ?? 'rugby'} player, goal: ${context.profile?.goal_type ?? 'maintenance'}
-- Weight: ${weight}kg (trend: ${context.weightTrend.trend}, weekly change: ${context.weightTrend.weeklyChange}kg)
-- Recovery: ${latestRecovery?.recovery_score ?? 'N/A'}% | HRV: ${latestRecovery?.hrv_ms ?? 'N/A'}ms | Strain: ${latestRecovery?.strain ?? 'N/A'}
-- Sleep: ${latestSleep?.duration_hours ?? 'N/A'}h | Performance: ${latestSleep?.performance_pct ?? 'N/A'}%
-- Today's Nutrition: ${Math.round(context.nutrition.today.calories)} cal, ${Math.round(context.nutrition.today.protein_g)}g protein, ${Math.round(context.nutrition.today.carbs_g)}g carbs
-- Targets: ${context.profile?.target_calories ?? 2500} cal, ${context.profile?.target_protein_g ?? 150}g protein
-- Academic Workload Score: ${context.academic.workloadScore}/100 | Stress: ${context.academic.stressEstimate}/100
+- Sport: ${context.profile?.sport ?? 'rugby'} | Goal: ${context.profile?.goal_type ?? 'maintenance'}
+- Weight: ${weight}kg (trend: ${context.weightTrend.trend}, weekly: ${round(context.weightTrend.weeklyChange, 2)}kg)
+- Recovery: ${latestRecovery?.recovery_score ?? 'N/A'}% | HRV: ${latestRecovery?.hrv_ms != null ? Math.round(latestRecovery.hrv_ms) : 'N/A'}ms | Strain: ${round(latestRecovery?.strain, 1) ?? 'N/A'}
+- Sleep: ${sleepDisplay} | Quality: ${latestSleep?.performance_pct != null ? Math.round(latestSleep.performance_pct) : 'N/A'}%
+- Today: ${Math.round(context.nutrition.today.calories)} cal, ${Math.round(context.nutrition.today.protein_g)}g protein
+- Targets: ${targets.calories ?? 'unset'} cal, ${targets.protein ?? 'unset'}g protein
+- Academic Workload: ${context.academic.workloadScore}/100 | Stress: ${context.academic.stressEstimate}/100
 - Exam This Week: ${context.calendar.hasExamThisWeek ? 'YES' : 'No'} | Match Today: ${context.calendar.hasMatchToday ? 'YES' : 'No'}
 
-## Composite Scores (Today)
-- Athletic Readiness: ${context.scores.athletic_readiness}/100
-- Student Athlete Score: ${context.scores.student_athlete_score}/100
-- Fatigue: ${context.scores.fatigue_score}/100
-- Performance Potential: ${context.scores.performance_potential}/100
-- School-Life Balance: ${context.scores.school_life_balance}/100
+## Composite Scores
+${Object.keys(context.scores).length > 0 ? `- Athletic Readiness: ${context.scores.athletic_readiness ?? 'N/A'}/100
+- Student Athlete: ${context.scores.student_athlete_score ?? 'N/A'}/100
+- Fatigue: ${context.scores.fatigue_score ?? 'N/A'}/100
+- Performance Potential: ${context.scores.performance_potential ?? 'N/A'}/100` : '- No scores computed yet — connect WHOOP or log data'}
 
-## Active Recommendations
+## Recommendations
 ${recs.map(r => `- [${r.priority.toUpperCase()}] ${r.category}: ${r.message}`).join('\n')}
 
-## Discovered Correlations
-${context.correlations.map((c: { description: string }) => `- ${c.description}`).join('\n') || 'Still gathering data...'}
+## Correlations
+${context.correlations.map((c: { description: string }) => `- ${c.description}`).join('\n') || 'Gathering data...'}
 
-## Recent Workouts (last 7 days)
-${context.workouts.slice(0, 5).map((w: { date: string; activity_type: string; duration_minutes?: number; strain?: number }) => `- ${w.date}: ${w.activity_type} (${w.duration_minutes ?? '?'}min, strain: ${w.strain ?? 'N/A'})`).join('\n') || 'No recent workouts'}
+## Recent Workouts
+${context.workouts.slice(0, 5).map((w: { date: string; activity_type: string; duration_minutes?: number; strain?: number }) => `- ${w.date}: ${w.activity_type} (${w.duration_minutes ?? '?'}min, strain ${round(w.strain, 1) ?? '?'})`).join('\n') || 'None logged'}
 
-## Memories
-${memories.map(m => `- [${m.category}] ${m.key}: ${m.value}`).join('\n') || 'No stored memories yet'}
+## Upcoming Schedule (Calendar)
+${upcomingEvents || 'No upcoming events — connect Google Calendar'}
 
-## Capabilities
-You CAN and SHOULD: log meals, log weight, log workouts, create schedules, update records, explain trends, predict outcomes, generate reports, and perform calculations. When the user asks you to log something, confirm what you'll log with estimated values.
+## Recent Emails (Gmail)
+${recentEmails || 'No recent emails synced — connect Google'}
 
-Always interconnect your advice: if recovery is low AND there's an exam AND protein is low, address ALL factors together.`;
+## User Memories
+${userMemories.map(m => `- [${m.category}] ${m.key}: ${m.value}`).join('\n') || 'None'}
+
+## Auto-Learned (from your behavior & data)
+${autoMemories.map(m => `- [${m.category}] ${m.key}: ${m.value}`).join('\n') || 'Still learning — keep using the app'}
+
+You CAN: log meals (say "Log: I ate..." and it saves automatically with date), remove meals ("Remove my last meal", "Delete lunch today"), log weight, explain trends, predict outcomes, generate reports. Meals are saved with timestamps — users can say "yesterday I ate..." for past dates.`;
+  } catch (err) {
+    console.error('buildSystemPrompt error:', err);
+    return `You are AiCoach, an AI coach for a student athlete. Some data failed to load — still give helpful advice based on the user's message.`;
+  }
 }
 
-async function callOllama(systemPrompt: string, messages: { role: string; content: string }[]): Promise<string> {
-  try {
-    const response = await fetch(`${OLLAMA_URL}/api/chat`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        model: OLLAMA_MODEL,
-        messages: [{ role: 'system', content: systemPrompt }, ...messages],
-        stream: false,
-        options: { temperature: 0.7, num_predict: 2048 },
-      }),
-    });
+function getModelChain(userId: string): string[] {
+  const { model } = getAIConfig(userId);
+  const chain = [model, ...MODEL_FALLBACKS].filter(Boolean);
+  return [...new Set(chain)];
+}
 
-    if (!response.ok) throw new Error(`Ollama error: ${response.status}`);
-    const data = await response.json() as { message: { content: string } };
-    return data.message.content;
-  } catch {
-    return generateFallbackResponse(systemPrompt, messages);
+async function callOpenRouter(userId: string, systemPrompt: string, messages: { role: string; content: string }[]): Promise<AIResult> {
+  const { apiKey } = getAIConfig(userId);
+  if (!apiKey) {
+    return {
+      content: generateFallbackResponse(systemPrompt, messages),
+      source: 'fallback',
+      error: 'OpenRouter API key not configured. Add OPENROUTER_API_KEY to .env or Settings.',
+    };
   }
+
+  const models = getModelChain(userId);
+  let lastError = '';
+
+  for (const model of models) {
+    try {
+      const response = await fetch(OPENROUTER_URL, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${apiKey}`,
+          'HTTP-Referer': env.CLIENT_URL || env.APP_URL,
+          'X-Title': 'AiCoach',
+        },
+        body: JSON.stringify({
+          model,
+          messages: [
+            { role: 'system', content: systemPrompt },
+            ...messages.map(m => ({ role: m.role, content: m.content })),
+          ],
+          temperature: 0.7,
+          max_tokens: 2048,
+        }),
+      });
+
+      const bodyText = await response.text();
+      if (!response.ok) {
+        lastError = parseOpenRouterError(response.status, bodyText);
+        console.warn('OpenRouter model failed:', model, lastError);
+        continue;
+      }
+
+      const data = JSON.parse(bodyText) as { choices?: { message?: { content?: string } }[]; error?: { message?: string } };
+      const content = data.choices?.[0]?.message?.content;
+      if (!content) {
+        lastError = `Model ${model}: empty response`;
+        continue;
+      }
+
+      return { content, source: 'openrouter', model };
+    } catch (err) {
+      lastError = `Model ${model}: ${(err as Error).message}`;
+      console.warn('OpenRouter request error:', lastError);
+    }
+  }
+
+  const fallback = generateFallbackResponse(systemPrompt, messages);
+  return {
+    content: `${fallback}\n\n---\n*AI unavailable: ${lastError || 'All models failed'}. Check Settings → OpenRouter.*`,
+    source: 'fallback',
+    error: lastError || 'All models failed',
+  };
+}
+
+export async function testOpenRouter(userId: string): Promise<{ ok: boolean; model?: string; error?: string; latencyMs?: number }> {
+  const start = Date.now();
+  const result = await callOpenRouter(userId, 'You are a test assistant. Reply with exactly: OK', [{ role: 'user', content: 'ping' }]);
+  return {
+    ok: result.source === 'openrouter',
+    model: result.model,
+    error: result.error,
+    latencyMs: Date.now() - start,
+  };
 }
 
 function generateFallbackResponse(systemPrompt: string, messages: { role: string; content: string }[]): string {
   const lastMessage = messages[messages.length - 1]?.content.toLowerCase() ?? '';
-  const recs = systemPrompt.match(/## Active Recommendations\n([\s\S]*?)\n##/)?.[1] ?? '';
+  const recs = systemPrompt.match(/## Recommendations\n([\s\S]*?)\n##/)?.[1] ?? '';
 
   if (lastMessage.includes('log') && (lastMessage.includes('ate') || lastMessage.includes('had') || lastMessage.includes('drank'))) {
     const nutrition = estimateMealNutrition(messages[messages.length - 1].content);
-    return `I've estimated your meal:\n- **Calories:** ${nutrition.calories}\n- **Protein:** ${nutrition.protein_g}g\n- **Carbs:** ${nutrition.carbs_g}g\n- **Fat:** ${nutrition.fat_g}g\n- **Fibre:** ${nutrition.fibre_g}g\n\nSay "confirm" to save this meal, or provide corrections.`;
+    return `Logged meal estimate:\n- **Calories:** ${nutrition.calories}\n- **Protein:** ${nutrition.protein_g}g\n- **Carbs:** ${nutrition.carbs_g}g\n- **Fat:** ${nutrition.fat_g}g\n\n*(Saved to your nutrition log)*`;
   }
 
-  if (lastMessage.includes('recovery') || lastMessage.includes('how am i')) {
-    const recoveryMatch = systemPrompt.match(/Recovery: (\d+)%/);
-    const readinessMatch = systemPrompt.match(/Athletic Readiness: (\d+)/);
-    return `Based on your interconnected data:\n\n**Recovery:** ${recoveryMatch?.[1] ?? 'N/A'}%\n**Athletic Readiness:** ${readinessMatch?.[1] ?? 'N/A'}/100\n\n${recs.trim() || 'Keep tracking consistently for better insights.'}\n\n*Note: Connect Ollama (localhost:11434) for full AI capabilities.*`;
-  }
-
-  if (lastMessage.includes('report') || lastMessage.includes('summary')) {
-    return `## Daily Summary\n\n${systemPrompt.split('## Composite Scores')[1]?.split('## Active Recommendations')[0] ?? 'Data loading...'}\n\n### Recommendations\n${recs.trim()}\n\n*Connect Ollama for detailed AI-generated reports.*`;
-  }
-
-  if (lastMessage.includes('weight')) {
-    const weightMatch = systemPrompt.match(/Weight: ([\d.]+)kg/);
-    const trendMatch = systemPrompt.match(/trend: (\w+)/);
-    return `**Current Weight:** ${weightMatch?.[1] ?? 'Not logged'}kg (${trendMatch?.[1] ?? 'unknown'} trend)\n\nLog weight with: "Log my weight as 82.5kg"\n\nFor full AI analysis, ensure Ollama is running locally.`;
-  }
-
-  return `I'm AiCoach, your local student athlete OS. I have access to all your health, training, nutrition, academic, and recovery data.\n\n**Top Recommendations:**\n${recs.trim().split('\n').slice(0, 3).join('\n') || '- Start logging data for personalized insights'}\n\nAsk me about recovery, nutrition, training, academics, or say "log [meal/weight/workout]".\n\n*Running in offline mode — start Ollama for full AI.*`;
+  return `I'm AiCoach with access to all your interconnected data.\n\n**Recommendations:**\n${recs.trim().split('\n').slice(0, 3).join('\n') || '- Start logging data for insights'}\n\n*Configure OpenRouter API key in Settings for full AI.*`;
 }
 
 export async function chat(userId: string, conversationId: string | null, userMessage: string) {
@@ -190,25 +251,82 @@ export async function chat(userId: string, conversationId: string | null, userMe
   db.prepare(`INSERT INTO messages (id, conversation_id, role, content) VALUES (?, ?, 'user', ?)`)
     .run(generateId(), convId, userMessage);
 
+  learnFromChatMessage(userId, userMessage);
+
+  // Auto-save meals and weight from chat
+  let mealLogged: ReturnType<typeof logMeal> | null = null;
+  let weightLogged: { logged: boolean; weight_kg?: number } | null = null;
+
+  if (isMealLogIntent(userMessage)) {
+    mealLogged = logMeal(userId, userMessage);
+  }
+  if (isWeightLogIntent(userMessage)) {
+    weightLogged = logWeightFromChat(userId, userMessage);
+  }
+
+  let mealsDeleted: { id: string; description: string; logged_at: string }[] = [];
+  if (isMealDeleteIntent(userMessage)) {
+    mealsDeleted = deleteMealsFromChat(userId, userMessage).deleted;
+  }
+
   const history = db.prepare(`
     SELECT role, content FROM messages WHERE conversation_id = ? ORDER BY created_at ASC LIMIT 20
   `).all(convId) as { role: string; content: string }[];
 
   const systemPrompt = buildSystemPrompt(userId);
-  const response = await callOllama(systemPrompt, history);
+  const aiResult = await callOpenRouter(userId, systemPrompt, history);
 
-  const metadata: Record<string, unknown> = {};
-  const lower = userMessage.toLowerCase();
-  if (lower.includes('log') && (lower.includes('ate') || lower.includes('had') || lower.includes('drank'))) {
-    metadata.suggestedMeal = estimateMealNutrition(userMessage);
+  const metadata: Record<string, unknown> = {
+    source: aiResult.source,
+    model: aiResult.model,
+    error: aiResult.error,
+  };
+
+  if (mealLogged) {
+    metadata.mealLogged = mealLogged;
+  }
+  if (weightLogged?.logged) {
+    metadata.weightLogged = weightLogged;
+  }
+  if (mealsDeleted.length > 0) {
+    metadata.mealsDeleted = mealsDeleted;
+  }
+
+  let responseText = aiResult.content;
+  if (mealLogged && !responseText.toLowerCase().includes('logged') && !responseText.toLowerCase().includes('saved')) {
+    const dateStr = new Date(mealLogged.logged_at).toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+    responseText += `\n\n✅ **Meal saved** (${dateStr})\n- ${mealLogged.calories} cal · ${mealLogged.protein_g}g protein · ${mealLogged.carbs_g}g carbs · ${mealLogged.fat_g}g fat`;
+    if (mealLogged.matchedFoods?.length) {
+      responseText += `\n- Detected: ${mealLogged.matchedFoods.join(', ')}`;
+    }
+  }
+  if (weightLogged?.logged) {
+    responseText += `\n\n✅ **Weight saved:** ${weightLogged.weight_kg} kg`;
+  }
+  if (mealsDeleted.length > 0) {
+    responseText += `\n\n🗑️ **Removed ${mealsDeleted.length} meal(s):** ${mealsDeleted.map(m => m.description).join('; ')}`;
   }
 
   db.prepare(`INSERT INTO messages (id, conversation_id, role, content, metadata) VALUES (?, ?, 'assistant', ?, ?)`)
-    .run(generateId(), convId, response, JSON.stringify(metadata));
+    .run(generateId(), convId, responseText, JSON.stringify(metadata));
 
   db.prepare(`UPDATE conversations SET updated_at = datetime('now') WHERE id = ?`).run(convId);
 
-  return { conversationId: convId, response, metadata };
+  runLearningCycle(userId);
+
+  const status = getOpenRouterStatus(userId);
+  return {
+    conversationId: convId,
+    response: responseText,
+    metadata,
+    mealLogged,
+    weightLogged,
+    mealsDeleted: mealsDeleted.length > 0 ? mealsDeleted : undefined,
+    source: aiResult.source,
+    model: aiResult.model,
+    error: aiResult.error,
+    aiConfigured: status.configured,
+  };
 }
 
 export function getConversations(userId: string) {

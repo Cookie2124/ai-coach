@@ -1,23 +1,66 @@
 import { db } from '../../db/database.js';
 import { generateId } from '../../types/index.js';
+import { getCredentials, refreshTokenIfNeeded, setSyncStatus, saveIntegration, getIntegration } from './base.js';
+import { refreshOAuthToken } from './oauth.js';
+import { applyDefaultProfileTargets } from '../analytics/profile.js';
 
-const WHOOP_API = 'https://api.prod.whoop.com/developer/v1';
+const WHOOP_API = 'https://api.prod.whoop.com/developer/v2';
+/** WHOOP launched ~2015 — fetch everything from before membership could exist */
+const WHOOP_HISTORY_START = '2014-01-01T00:00:00.000Z';
+const INCREMENTAL_SYNC_DAYS = 30;
+const FULL_SYNC_CHUNK_DAYS = 180;
 
-interface WhoopCredentials {
-  access_token: string;
-  refresh_token?: string;
+export interface WhoopSyncOptions {
+  /** Import all historical data from account creation to now */
+  fullHistory?: boolean;
+  /** Days back for incremental sync (default 30) */
+  days?: number;
 }
 
-async function whoopFetch(endpoint: string, token: string) {
+interface WhoopPage<T> {
+  records?: T[];
+  next_token?: string;
+}
+
+interface ImportCounts {
+  recovery: number;
+  sleep: number;
+  workouts: number;
+  weight: number;
+  cycles: number;
+}
+
+async function getWhoopToken(userId: string): Promise<string> {
+  return refreshTokenIfNeeded(userId, 'whoop', (rt) => refreshOAuthToken('whoop', rt, rt));
+}
+
+async function whoopFetch<T = unknown>(endpoint: string, token: string): Promise<T> {
   const response = await fetch(`${WHOOP_API}${endpoint}`, {
     headers: { Authorization: `Bearer ${token}` },
   });
-  if (!response.ok) throw new Error(`WHOOP API error: ${response.status}`);
-  return response.json();
+  if (!response.ok) {
+    const body = await response.text();
+    throw new Error(`WHOOP API ${response.status}: ${body}`);
+  }
+  return response.json() as Promise<T>;
+}
+
+async function whoopFetchAll<T>(path: string, token: string, params: Record<string, string>): Promise<T[]> {
+  const records: T[] = [];
+  let nextToken: string | undefined;
+
+  do {
+    const qs = new URLSearchParams({ ...params, limit: '25', ...(nextToken ? { nextToken } : {}) });
+    const page = await whoopFetch<WhoopPage<T>>(`${path}?${qs}`, token);
+    records.push(...(page.records ?? []));
+    nextToken = page.next_token;
+  } while (nextToken);
+
+  return records;
 }
 
 function mapActivityType(sportName: string): string {
-  const lower = sportName.toLowerCase();
+  const lower = (sportName ?? '').toLowerCase();
   if (lower.includes('rugby')) return 'rugby';
   if (lower.includes('run')) return 'running';
   if (lower.includes('cycle') || lower.includes('bike')) return 'cycling';
@@ -27,162 +70,363 @@ function mapActivityType(sportName: string): string {
   return 'other';
 }
 
-export async function syncWhoopData(userId: string) {
-  const integration = db.prepare(`SELECT credentials FROM integrations WHERE user_id = ? AND provider = 'whoop'`).get(userId) as { credentials: string } | undefined;
-  if (!integration) throw new Error('WHOOP not configured');
+function upsertWhoopRecovery(userId: string, date: string, fields: {
+  recovery_score?: number | null;
+  hrv_ms?: number | null;
+  resting_hr?: number | null;
+  respiratory_rate?: number | null;
+  strain?: number | null;
+  calories_burned?: number | null;
+  raw_data?: string;
+}) {
+  db.prepare(`
+    INSERT INTO recovery_entries (id, user_id, date, recovery_score, hrv_ms, resting_hr, respiratory_rate, strain, calories_burned, source, raw_data)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'whoop', ?)
+    ON CONFLICT(user_id, date, source) DO UPDATE SET
+      recovery_score=COALESCE(excluded.recovery_score, recovery_score),
+      hrv_ms=COALESCE(excluded.hrv_ms, hrv_ms),
+      resting_hr=COALESCE(excluded.resting_hr, resting_hr),
+      respiratory_rate=COALESCE(excluded.respiratory_rate, respiratory_rate),
+      strain=COALESCE(excluded.strain, strain),
+      calories_burned=COALESCE(excluded.calories_burned, calories_burned),
+      raw_data=COALESCE(excluded.raw_data, raw_data)
+  `).run(
+    generateId(), userId, date,
+    fields.recovery_score ?? null,
+    fields.hrv_ms ?? null,
+    fields.resting_hr ?? null,
+    fields.respiratory_rate ?? null,
+    fields.strain ?? null,
+    fields.calories_burned ?? null,
+    fields.raw_data ?? '{}',
+  );
+}
 
-  const creds: WhoopCredentials = JSON.parse(integration.credentials);
-  if (!creds.access_token) throw new Error('WHOOP access token missing');
+function upsertWhoopWorkout(userId: string, wo: {
+  id: string;
+  start: string;
+  end: string;
+  sport_name: string;
+  score?: {
+    strain: number;
+    average_heart_rate: number;
+    max_heart_rate: number;
+    kilojoule: number;
+    distance_meter?: number;
+  };
+}) {
+  const date = wo.start?.split('T')[0];
+  if (!date) return false;
 
-  db.prepare(`UPDATE integrations SET sync_status = 'syncing' WHERE user_id = ? AND provider = 'whoop'`).run(userId);
+  const durationMin = wo.end && wo.start
+    ? Math.round((new Date(wo.end).getTime() - new Date(wo.start).getTime()) / 60000)
+    : null;
 
-  let imported = { recovery: 0, sleep: 0, workouts: 0 };
+  const existing = db.prepare(`
+    SELECT id FROM workouts WHERE user_id = ? AND source = 'whoop'
+    AND (raw_data LIKE ? OR raw_data LIKE ?)
+  `).get(userId, `%"id":"${wo.id}"%`, `%"id": "${wo.id}"%`) as { id: string } | undefined;
+
+  const payload = JSON.stringify(wo);
+
+  if (existing) {
+    db.prepare(`
+      UPDATE workouts SET date=?, activity_type=?, duration_minutes=?, strain=?, calories=?, distance_km=?,
+        avg_hr=?, max_hr=?, notes=?, raw_data=? WHERE id=?
+    `).run(
+      date, mapActivityType(wo.sport_name), durationMin,
+      wo.score?.strain ?? null,
+      wo.score?.kilojoule ? Math.round(wo.score.kilojoule / 4.184) : null,
+      wo.score?.distance_meter ? wo.score.distance_meter / 1000 : null,
+      wo.score?.average_heart_rate ?? null,
+      wo.score?.max_heart_rate ?? null,
+      wo.sport_name, payload, existing.id,
+    );
+    return false;
+  }
+
+  db.prepare(`
+    INSERT INTO workouts (id, user_id, date, activity_type, duration_minutes, strain, calories, distance_km, avg_hr, max_hr, notes, source, raw_data)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'whoop', ?)
+  `).run(
+    generateId(), userId, date, mapActivityType(wo.sport_name), durationMin,
+    wo.score?.strain ?? null,
+    wo.score?.kilojoule ? Math.round(wo.score.kilojoule / 4.184) : null,
+    wo.score?.distance_meter ? wo.score.distance_meter / 1000 : null,
+    wo.score?.average_heart_rate ?? null,
+    wo.score?.max_heart_rate ?? null,
+    wo.sport_name, payload,
+  );
+  return true;
+}
+
+async function syncWhoopDateRange(
+  userId: string,
+  token: string,
+  start: string,
+  end: string,
+  imported: ImportCounts,
+  errors: string[],
+  cycleDateMap: Map<number, string>,
+) {
+  const range = { start, end };
 
   try {
+    const cycles = await whoopFetchAll<{ id: number; start: string; score?: { strain: number; kilojoule: number } }>(
+      '/cycle', token, range,
+    );
+    for (const c of cycles) {
+      const date = c.start?.split('T')[0];
+      if (!date) continue;
+      cycleDateMap.set(c.id, date);
+      upsertWhoopRecovery(userId, date, {
+        strain: c.score?.strain ?? null,
+        calories_burned: c.score?.kilojoule ? Math.round(c.score.kilojoule / 4.184) : null,
+        raw_data: JSON.stringify(c),
+      });
+      imported.cycles++;
+    }
+  } catch (e) {
+    errors.push(`cycles: ${(e as Error).message}`);
+  }
+
+  try {
+    const recoveries = await whoopFetchAll<{
+      cycle_id: number;
+      created_at: string;
+      score_state: string;
+      score?: {
+        recovery_score: number;
+        resting_heart_rate: number;
+        hrv_rmssd_milli: number;
+      };
+    }>('/recovery', token, range);
+
+    for (const rec of recoveries) {
+      if (rec.score_state !== 'SCORED' || !rec.score) continue;
+      const date = cycleDateMap.get(rec.cycle_id) ?? rec.created_at?.split('T')[0];
+      if (!date) continue;
+
+      upsertWhoopRecovery(userId, date, {
+        recovery_score: rec.score.recovery_score,
+        hrv_ms: rec.score.hrv_rmssd_milli,
+        resting_hr: rec.score.resting_heart_rate,
+        raw_data: JSON.stringify(rec),
+      });
+      imported.recovery++;
+    }
+  } catch (e) {
+    errors.push(`recovery: ${(e as Error).message}`);
+  }
+
+  try {
+    const sleeps = await whoopFetchAll<{
+      id: string;
+      start: string;
+      score_state: string;
+      score?: {
+        stage_summary: {
+          total_in_bed_time_milli: number;
+          total_awake_time_milli: number;
+          total_light_sleep_time_milli: number;
+          total_slow_wave_sleep_time_milli: number;
+          total_rem_sleep_time_milli: number;
+        };
+        sleep_performance_percentage: number;
+        sleep_consistency_percentage: number;
+        sleep_efficiency_percentage: number;
+        respiratory_rate?: number;
+      };
+    }>('/activity/sleep', token, range);
+
+    for (const sl of sleeps) {
+      if (sl.score_state !== 'SCORED' || !sl.score) continue;
+      const date = sl.start?.split('T')[0];
+      if (!date) continue;
+
+      const totalMs = sl.score.stage_summary?.total_in_bed_time_milli ?? 0;
+      db.prepare(`
+        INSERT INTO sleep_entries (id, user_id, date, duration_hours, performance_pct, consistency_pct, efficiency_pct,
+          deep_sleep_hours, rem_sleep_hours, light_sleep_hours, awake_hours, source, raw_data)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'whoop', ?)
+        ON CONFLICT(user_id, date, source) DO UPDATE SET
+          duration_hours=excluded.duration_hours, performance_pct=excluded.performance_pct,
+          consistency_pct=excluded.consistency_pct, efficiency_pct=excluded.efficiency_pct,
+          deep_sleep_hours=excluded.deep_sleep_hours, rem_sleep_hours=excluded.rem_sleep_hours,
+          light_sleep_hours=excluded.light_sleep_hours, awake_hours=excluded.awake_hours,
+          raw_data=excluded.raw_data
+      `).run(generateId(), userId, date,
+        totalMs / 3600000,
+        sl.score.sleep_performance_percentage,
+        sl.score.sleep_consistency_percentage,
+        sl.score.sleep_efficiency_percentage,
+        (sl.score.stage_summary?.total_slow_wave_sleep_time_milli ?? 0) / 3600000,
+        (sl.score.stage_summary?.total_rem_sleep_time_milli ?? 0) / 3600000,
+        (sl.score.stage_summary?.total_light_sleep_time_milli ?? 0) / 3600000,
+        (sl.score.stage_summary?.total_awake_time_milli ?? 0) / 3600000,
+        JSON.stringify(sl));
+
+      if (sl.score.respiratory_rate) {
+        upsertWhoopRecovery(userId, date, { respiratory_rate: sl.score.respiratory_rate });
+      }
+      imported.sleep++;
+    }
+  } catch (e) {
+    errors.push(`sleep: ${(e as Error).message}`);
+  }
+
+  try {
+    const workouts = await whoopFetchAll<{
+      id: string;
+      start: string;
+      end: string;
+      sport_name: string;
+      score_state: string;
+      score?: {
+        strain: number;
+        average_heart_rate: number;
+        max_heart_rate: number;
+        kilojoule: number;
+        distance_meter?: number;
+      };
+    }>('/activity/workout', token, range);
+
+    for (const wo of workouts) {
+      if (wo.score_state !== 'SCORED') continue;
+      if (upsertWhoopWorkout(userId, wo)) imported.workouts++;
+    }
+  } catch (e) {
+    errors.push(`workouts: ${(e as Error).message}`);
+  }
+}
+
+export function getWhoopDataStats(userId: string) {
+  const recovery = db.prepare(`
+    SELECT COUNT(*) as c, MIN(date) as earliest, MAX(date) as latest FROM recovery_entries WHERE user_id = ? AND source = 'whoop'
+  `).get(userId) as { c: number; earliest: string; latest: string };
+  const sleep = db.prepare(`
+    SELECT COUNT(*) as c, MIN(date) as earliest, MAX(date) as latest FROM sleep_entries WHERE user_id = ? AND source = 'whoop'
+  `).get(userId) as { c: number; earliest: string; latest: string };
+  const workouts = db.prepare(`
+    SELECT COUNT(*) as c, MIN(date) as earliest, MAX(date) as latest FROM workouts WHERE user_id = ? AND source = 'whoop'
+  `).get(userId) as { c: number; earliest: string; latest: string };
+
+  const integration = getIntegration(userId, 'whoop');
+  const config = integration?.config ? JSON.parse(integration.config) : {};
+
+  return { recovery, sleep, workouts, config };
+}
+
+export async function syncWhoopData(userId: string, options?: WhoopSyncOptions) {
+  const creds = getCredentials(userId, 'whoop');
+  if (!creds.access_token) throw new Error('WHOOP not connected. Click Connect on the Integrations page.');
+
+  const fullHistory = options?.fullHistory ?? false;
+  setSyncStatus(userId, 'whoop', fullHistory ? 'syncing-full' : 'syncing');
+
+  const imported: ImportCounts = { recovery: 0, sleep: 0, workouts: 0, weight: 0, cycles: 0 };
+  const errors: string[] = [];
+  const cycleDateMap = new Map<number, string>();
+
+  try {
+    const token = await getWhoopToken(userId);
     const end = new Date().toISOString();
-    const start = new Date(Date.now() - 30 * 86400000).toISOString();
 
-    try {
-      const cycles = await whoopFetch(`/cycle?start=${start}&end=${end}`, creds.access_token) as { records: Record<string, unknown>[] };
-      for (const cycle of cycles.records ?? []) {
-        const c = cycle as { id: number; start: string; score: { strain: number; kilojoule: number }; recovery: { score: { recovery_score: number; resting_heart_rate: number; hrv_rmssd_milli: number; spo2_percentage: number; skin_temp_celsius: number } } };
-        const date = c.start?.split('T')[0];
-        if (!date) continue;
+    if (fullHistory) {
+      let cursor = new Date(WHOOP_HISTORY_START);
+      const endDate = new Date();
+      let chunkIndex = 0;
 
-        const id = generateId();
-        db.prepare(`
-          INSERT INTO recovery_entries (id, user_id, date, recovery_score, hrv_ms, resting_hr, strain, calories_burned, source, raw_data)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'whoop', ?)
-          ON CONFLICT(user_id, date, source) DO UPDATE SET
-            recovery_score=excluded.recovery_score, hrv_ms=excluded.hrv_ms,
-            resting_hr=excluded.resting_hr, strain=excluded.strain,
-            calories_burned=excluded.calories_burned, raw_data=excluded.raw_data
-        `).run(id, userId, date,
-          c.recovery?.score?.recovery_score,
-          c.recovery?.score?.hrv_rmssd_milli,
-          c.recovery?.score?.resting_heart_rate,
-          c.score?.strain,
-          c.score?.kilojoule ? Math.round(c.score.kilojoule / 4.184) : null,
-          JSON.stringify(c));
-        imported.recovery++;
+      while (cursor < endDate) {
+        const chunkEnd = new Date(Math.min(
+          cursor.getTime() + FULL_SYNC_CHUNK_DAYS * 86400000,
+          endDate.getTime(),
+        ));
+        await syncWhoopDateRange(
+          userId, token,
+          cursor.toISOString(),
+          chunkEnd.toISOString(),
+          imported, errors, cycleDateMap,
+        );
+        cursor = chunkEnd;
+        chunkIndex++;
+        // Brief pause between chunks to stay under WHOOP rate limits (100/min)
+        if (cursor < endDate) await new Promise(r => setTimeout(r, 300));
       }
-    } catch (e) { console.warn('WHOOP cycles sync partial:', e); }
 
+      console.log(`WHOOP full history sync: ${chunkIndex} chunks for user ${userId}`);
+    } else {
+      const days = options?.days ?? INCREMENTAL_SYNC_DAYS;
+      const start = new Date(Date.now() - days * 86400000).toISOString();
+      await syncWhoopDateRange(userId, token, start, end, imported, errors, cycleDateMap);
+    }
+
+    // Profile + body measurements
     try {
-      const sleep = await whoopFetch(`/activity/sleep?start=${start}&end=${end}`, creds.access_token) as { records: Record<string, unknown>[] };
-      for (const s of sleep.records ?? []) {
-        const sl = s as { start: string; score: { stage_summary: { total_in_bed_time_milli: number; total_awake_time_milli: number; total_light_sleep_time_milli: number; total_slow_wave_sleep_time_milli: number; total_rem_sleep_time_milli: number }; sleep_performance_percentage: number; sleep_consistency_percentage: number; sleep_efficiency_percentage: number } };
-        const date = sl.start?.split('T')[0];
-        if (!date) continue;
-
-        const totalMs = sl.score?.stage_summary?.total_in_bed_time_milli ?? 0;
-        const id = generateId();
-        db.prepare(`
-          INSERT INTO sleep_entries (id, user_id, date, duration_hours, performance_pct, consistency_pct, efficiency_pct,
-            deep_sleep_hours, rem_sleep_hours, light_sleep_hours, awake_hours, source, raw_data)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'whoop', ?)
-          ON CONFLICT(user_id, date, source) DO UPDATE SET
-            duration_hours=excluded.duration_hours, performance_pct=excluded.performance_pct,
-            consistency_pct=excluded.consistency_pct, efficiency_pct=excluded.efficiency_pct,
-            deep_sleep_hours=excluded.deep_sleep_hours, rem_sleep_hours=excluded.rem_sleep_hours,
-            light_sleep_hours=excluded.light_sleep_hours, awake_hours=excluded.awake_hours,
-            raw_data=excluded.raw_data
-        `).run(id, userId, date,
-          totalMs / 3600000,
-          sl.score?.sleep_performance_percentage,
-          sl.score?.sleep_consistency_percentage,
-          sl.score?.sleep_efficiency_percentage,
-          (sl.score?.stage_summary?.total_slow_wave_sleep_time_milli ?? 0) / 3600000,
-          (sl.score?.stage_summary?.total_rem_sleep_time_milli ?? 0) / 3600000,
-          (sl.score?.stage_summary?.total_light_sleep_time_milli ?? 0) / 3600000,
-          (sl.score?.stage_summary?.total_awake_time_milli ?? 0) / 3600000,
-          JSON.stringify(sl));
-        imported.sleep++;
+      const profile = await whoopFetch<Record<string, unknown>>('/user/profile/basic', token);
+      const body = await whoopFetch<{ height_meter: number; weight_kilogram: number; max_heart_rate: number }>(
+        '/user/measurement/body', token,
+      );
+      if (body.weight_kilogram) {
+        applyDefaultProfileTargets(userId, body.weight_kilogram);
       }
-    } catch (e) { console.warn('WHOOP sleep sync partial:', e); }
 
-    try {
-      const workouts = await whoopFetch(`/activity/workout?start=${start}&end=${end}`, creds.access_token) as { records: Record<string, unknown>[] };
-      for (const w of workouts.records ?? []) {
-        const wo = w as { start: string; sport_name: string; score: { strain: number; average_heart_rate: number; max_heart_rate: number; kilojoule: number; distance_meter?: number }; end: string };
-        const date = wo.start?.split('T')[0];
-        if (!date) continue;
+      const existing = getIntegration(userId, 'whoop');
+      const prevConfig = existing?.config ? JSON.parse(existing.config) : {};
+      saveIntegration(userId, 'whoop', creds, {
+        ...prevConfig,
+        profile,
+        body,
+        ...(fullHistory && {
+          full_history_synced_at: new Date().toISOString(),
+          full_history_counts: imported,
+        }),
+        last_sync_mode: fullHistory ? 'full' : 'incremental',
+      }, true);
 
-        const durationMin = wo.end && wo.start
-          ? Math.round((new Date(wo.end).getTime() - new Date(wo.start).getTime()) / 60000)
-          : null;
-
-        const id = generateId();
-        db.prepare(`
-          INSERT INTO workouts (id, user_id, date, activity_type, duration_minutes, strain, calories, distance_km, avg_hr, max_hr, source, raw_data)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'whoop', ?)
-        `).run(id, userId, date,
-          mapActivityType(wo.sport_name ?? 'other'),
-          durationMin,
-          wo.score?.strain,
-          wo.score?.kilojoule ? Math.round(wo.score.kilojoule / 4.184) : null,
-          wo.score?.distance_meter ? wo.score.distance_meter / 1000 : null,
-          wo.score?.average_heart_rate,
-          wo.score?.max_heart_rate,
-          JSON.stringify(wo));
-        imported.workouts++;
+      if (body.weight_kilogram) {
+        const today = new Date().toISOString().split('T')[0];
+        const weightRow = db.prepare(`SELECT id FROM weight_entries WHERE user_id = ? AND date(recorded_at) = ? AND notes LIKE '%WHOOP%'`).get(userId, today);
+        if (!weightRow) {
+          db.prepare(`INSERT INTO weight_entries (id, user_id, weight_kg, notes, recorded_at) VALUES (?, ?, ?, ?, ?)`)
+            .run(generateId(), userId, body.weight_kilogram, 'WHOOP body measurement', new Date().toISOString());
+          imported.weight++;
+        }
       }
-    } catch (e) { console.warn('WHOOP workouts sync partial:', e); }
+    } catch (e) {
+      errors.push(`body: ${(e as Error).message}`);
+    }
 
-    db.prepare(`UPDATE integrations SET sync_status = 'success', last_sync = datetime('now') WHERE user_id = ? AND provider = 'whoop'`).run(userId);
+    if (imported.recovery + imported.sleep + imported.workouts === 0 && errors.length > 0) {
+      throw new Error(`WHOOP sync failed: ${errors.join('; ')}`);
+    }
+
+    setSyncStatus(userId, 'whoop', errors.length > 0 ? 'partial' : 'success');
   } catch (error) {
-    db.prepare(`UPDATE integrations SET sync_status = 'error' WHERE user_id = ? AND provider = 'whoop'`).run(userId);
+    setSyncStatus(userId, 'whoop', 'error');
     throw error;
   }
 
-  return imported;
+  const stats = getWhoopDataStats(userId);
+  return { ...imported, stats, errors: errors.length > 0 ? errors : undefined, fullHistory };
 }
 
-export function importWhoopManualData(userId: string, data: {
-  recovery?: { date: string; recovery_score: number; hrv_ms?: number; resting_hr?: number; strain?: number }[];
-  sleep?: { date: string; duration_hours: number; performance_pct?: number; efficiency_pct?: number }[];
-  workouts?: { date: string; activity_type: string; duration_minutes?: number; strain?: number }[];
-}) {
-  let imported = { recovery: 0, sleep: 0, workouts: 0 };
-
-  for (const r of data.recovery ?? []) {
-    db.prepare(`
-      INSERT INTO recovery_entries (id, user_id, date, recovery_score, hrv_ms, resting_hr, strain, source)
-      VALUES (?, ?, ?, ?, ?, ?, ?, 'whoop')
-      ON CONFLICT(user_id, date, source) DO UPDATE SET recovery_score=excluded.recovery_score, hrv_ms=excluded.hrv_ms, resting_hr=excluded.resting_hr, strain=excluded.strain
-    `).run(generateId(), userId, r.date, r.recovery_score, r.hrv_ms, r.resting_hr, r.strain);
-    imported.recovery++;
-  }
-
-  for (const s of data.sleep ?? []) {
-    db.prepare(`
-      INSERT INTO sleep_entries (id, user_id, date, duration_hours, performance_pct, efficiency_pct, source)
-      VALUES (?, ?, ?, ?, ?, ?, 'whoop')
-      ON CONFLICT(user_id, date, source) DO UPDATE SET duration_hours=excluded.duration_hours, performance_pct=excluded.performance_pct
-    `).run(generateId(), userId, s.date, s.duration_hours, s.performance_pct, s.efficiency_pct);
-    imported.sleep++;
-  }
-
-  for (const w of data.workouts ?? []) {
-    db.prepare(`
-      INSERT INTO workouts (id, user_id, date, activity_type, duration_minutes, strain, source)
-      VALUES (?, ?, ?, ?, ?, ?, 'whoop')
-    `).run(generateId(), userId, w.date, w.activity_type, w.duration_minutes, w.strain);
-    imported.workouts++;
-  }
-
-  return imported;
+export function configureWhoopToken(userId: string, accessToken: string, refreshToken?: string, expiresAt?: number) {
+  saveIntegration(userId, 'whoop', {
+    access_token: accessToken,
+    refresh_token: refreshToken,
+    expires_at: expiresAt,
+  });
 }
 
-export function getIntegrationStatus(userId: string) {
-  return db.prepare(`SELECT provider, enabled, last_sync, sync_status FROM integrations WHERE user_id = ?`).all(userId);
+export async function testWhoopConnection(userId: string) {
+  const token = await getWhoopToken(userId);
+  const profile = await whoopFetch('/user/profile/basic', token);
+  return { connected: true, profile };
 }
 
-export function configureIntegration(userId: string, provider: string, credentials: Record<string, unknown>, enabled = true) {
-  const id = generateId();
-  db.prepare(`
-    INSERT INTO integrations (id, user_id, provider, enabled, credentials)
-    VALUES (?, ?, ?, ?, ?)
-    ON CONFLICT(user_id, provider) DO UPDATE SET enabled=excluded.enabled, credentials=excluded.credentials
-  `).run(id, userId, provider, enabled ? 1 : 0, JSON.stringify(credentials));
+export function workoutStrain(w: { strain?: number; duration_minutes?: number }): number {
+  if (w.strain != null) return w.strain;
+  if (w.duration_minutes) return w.duration_minutes / 10;
+  return 0;
 }

@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { NavLink, Outlet, useNavigate } from 'react-router-dom';
 import {
-  LayoutDashboard, MessageSquare, Utensils, Dumbbell, Heart, BookOpen,
+  LayoutDashboard, MessageSquare, Utensils, Dumbbell, Heart, BookOpen, Calendar,
   Settings, LogOut, Menu, X, Moon, Sun, Activity, Scale, FileText, Brain, Link2
 } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
@@ -15,6 +15,7 @@ const navItems = [
   { to: '/training', icon: Dumbbell, label: 'Training' },
   { to: '/recovery', icon: Heart, label: 'Recovery' },
   { to: '/academic', icon: BookOpen, label: 'Academic' },
+  { to: '/schedule', icon: Calendar, label: 'Schedule' },
   { to: '/insights', icon: Brain, label: 'Insights' },
   { to: '/reports', icon: FileText, label: 'Reports' },
   { to: '/integrations', icon: Link2, label: 'Integrations' },

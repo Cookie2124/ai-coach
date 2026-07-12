@@ -46,8 +46,9 @@ export const api = {
 
   data: {
     getMeals: (date?: string) => request<unknown[]>(`/data/meals${date ? `?date=${date}` : ''}`),
-    logMeal: (data: { description: string; meal_type?: string }) =>
+    logMeal: (data: { description: string; meal_type?: string; logged_at?: string }) =>
       request('/data/meals', { method: 'POST', body: JSON.stringify(data) }),
+    deleteMeal: (id: string) => request<{ success: boolean }>(`/data/meals/${id}`, { method: 'DELETE' }),
     logWeight: (data: { weight_kg: number; notes?: string }) =>
       request('/data/weight', { method: 'POST', body: JSON.stringify(data) }),
     getWorkouts: () => request<unknown[]>('/data/workouts'),
@@ -77,9 +78,11 @@ export const api = {
 
   ai: {
     chat: (message: string, conversationId?: string) =>
-      request<{ conversationId: string; response: string; metadata: Record<string, unknown> }>('/ai/chat', {
+      request<{ conversationId: string; response: string; metadata: Record<string, unknown>; source?: string; model?: string; error?: string; aiConfigured?: boolean; mealLogged?: Record<string, unknown>; weightLogged?: Record<string, unknown> }>('/ai/chat', {
         method: 'POST', body: JSON.stringify({ message, conversationId }),
       }),
+    test: () => request<{ ok: boolean; model?: string; error?: string; latencyMs?: number }>('/ai/test', { method: 'POST' }),
+    deleteConversation: (id: string) => request(`/ai/conversations/${id}`, { method: 'DELETE' }),
     getConversations: () => request<unknown[]>('/ai/conversations'),
     getMessages: (id: string) => request<unknown[]>(`/ai/conversations/${id}/messages`),
     generateReport: (type: string) => request<Record<string, unknown>>(`/ai/reports/${type}`, { method: 'POST' }),
@@ -90,10 +93,32 @@ export const api = {
     deleteMemory: (id: string) => request(`/ai/memories/${id}`, { method: 'DELETE' }),
   },
 
+  learning: {
+    status: () => request<{ autoMemories: unknown[]; learningInsights: unknown[]; totalAutoMemories: number }>('/learning/status'),
+    run: () => request<{ autoMemories: number; newInsights: number; lastRun: string }>('/learning/run', { method: 'POST' }),
+  },
+
   integrations: {
     list: () => request<unknown[]>('/integrations'),
+    getProviders: () => request<{ providers: Record<string, unknown>; oauthAvailable: Record<string, boolean>; oauthCallbackUrl: string }>('/integrations/providers'),
+    connect: (provider: string) => request<{ url: string }>(`/integrations/${provider}/connect`),
     configure: (provider: string, data: Record<string, unknown>) =>
       request(`/integrations/${provider}/configure`, { method: 'POST', body: JSON.stringify(data) }),
-    syncWhoop: () => request<Record<string, number>>('/integrations/whoop/sync', { method: 'POST' }),
+    sync: (provider: string, options?: { fullHistory?: boolean; days?: number }) =>
+      request<Record<string, unknown>>(`/integrations/${provider}/sync`, {
+        method: 'POST',
+        body: JSON.stringify(options ?? {}),
+      }),
+    whoopStatus: () => request<Record<string, unknown>>('/integrations/whoop/status'),
+    syncAll: () => request<Record<string, unknown>>('/integrations/sync-all', { method: 'POST' }),
+    disconnect: (provider: string) => request(`/integrations/${provider}`, { method: 'DELETE' }),
+    importAppleHealth: (data: unknown) =>
+      request<Record<string, number>>('/integrations/apple_health/import', { method: 'POST', body: JSON.stringify(data) }),
+  },
+
+  aiConfig: {
+    get: () => request<{ configured: boolean; model: string; source: string; hint?: string }>('/ai/config'),
+    update: (data: { apiKey?: string; model?: string }) =>
+      request('/ai/config', { method: 'POST', body: JSON.stringify(data) }),
   },
 };

@@ -1,12 +1,31 @@
 import { Router } from 'express';
 import { authMiddleware, type AuthRequest } from '../middleware/auth.js';
-import { chat, getConversations, getMessages, deleteConversation } from '../services/ai/index.js';
+import { chat, getConversations, getMessages, deleteConversation, configureOpenRouter, getOpenRouterStatus, testOpenRouter } from '../services/ai/index.js';
 import { generateReport, getReports, getReport } from '../services/reports/index.js';
 import { db } from '../db/database.js';
 import { generateId } from '../types/index.js';
 
 const router = Router();
 router.use(authMiddleware);
+
+router.get('/config', (req: AuthRequest, res) => {
+  res.json(getOpenRouterStatus(req.userId!));
+});
+
+router.post('/config', (req: AuthRequest, res) => {
+  const { apiKey, model } = req.body;
+  configureOpenRouter(req.userId!, apiKey, model);
+  res.json({ success: true, ...getOpenRouterStatus(req.userId!) });
+});
+
+router.post('/test', async (req: AuthRequest, res) => {
+  try {
+    const result = await testOpenRouter(req.userId!);
+    res.json(result);
+  } catch (error) {
+    res.status(500).json({ ok: false, error: (error as Error).message });
+  }
+});
 
 router.post('/chat', async (req: AuthRequest, res) => {
   try {
@@ -24,10 +43,14 @@ router.get('/conversations', (req: AuthRequest, res) => {
 });
 
 router.get('/conversations/:id/messages', (req: AuthRequest, res) => {
+  const conv = db.prepare(`SELECT id FROM conversations WHERE id = ? AND user_id = ?`).get(req.params.id, req.userId!) as { id: string } | undefined;
+  if (!conv) return res.status(404).json({ error: 'Conversation not found' });
   res.json(getMessages(String(req.params.id)));
 });
 
 router.delete('/conversations/:id', (req: AuthRequest, res) => {
+  const conv = db.prepare(`SELECT id FROM conversations WHERE id = ? AND user_id = ?`).get(req.params.id, req.userId!) as { id: string } | undefined;
+  if (!conv) return res.status(404).json({ error: 'Conversation not found' });
   deleteConversation(String(req.params.id));
   res.json({ success: true });
 });

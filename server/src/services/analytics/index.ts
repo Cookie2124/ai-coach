@@ -1,5 +1,7 @@
 import { db } from '../../db/database.js';
 import { daysAgo, today, type MealTotals, type DailyScores, type UnifiedContext } from '../../types/index.js';
+import { getEffectiveTargets, parseProfileRow } from './profile.js';
+import { fmtSleepHours, round, sanitizeRecoveryTrend } from '../../utils/format.js';
 
 function avg(values: number[]): number {
   if (values.length === 0) return 0;
@@ -8,6 +10,12 @@ function avg(values: number[]): number {
 
 function clamp(val: number, min = 0, max = 100): number {
   return Math.max(min, Math.min(max, val));
+}
+
+function workoutLoad(w: { strain?: number; duration_minutes?: number }): number {
+  if (w.strain != null) return w.strain;
+  if (w.duration_minutes) return w.duration_minutes / 10;
+  return 0;
 }
 
 export function getMealTotals(userId: string, startDate: string, endDate: string): MealTotals {
@@ -52,13 +60,13 @@ export function getTrainingLoad(userId: string, days: number) {
     WHERE user_id = ? AND date >= ? ORDER BY date
   `).all(userId, start) as { date: string; strain: number; duration_minutes: number; activity_type: string }[];
 
-  const acuteLoad = avg(workouts.slice(-7).map(w => w.strain || w.duration_minutes / 10 || 5));
-  const chronicLoad = avg(workouts.map(w => w.strain || w.duration_minutes / 10 || 5));
+  const acuteLoad = avg(workouts.slice(-7).map(workoutLoad));
+  const chronicLoad = avg(workouts.map(workoutLoad));
   const acwr = chronicLoad > 0 ? acuteLoad / chronicLoad : 1;
 
   const weeklyByType: Record<string, number> = {};
   for (const w of workouts.slice(-7)) {
-    weeklyByType[w.activity_type] = (weeklyByType[w.activity_type] || 0) + (w.strain || 5);
+    weeklyByType[w.activity_type] = (weeklyByType[w.activity_type] || 0) + workoutLoad(w);
   }
 
   return {
@@ -96,73 +104,86 @@ export function getAcademicWorkload(userId: string) {
 }
 
 export function computeDailyScores(userId: string, date: string): DailyScores {
-  const recovery = db.prepare(`SELECT * FROM recovery_entries WHERE user_id = ? AND date = ?`).get(userId, date) as Record<string, number> | undefined;
-  const sleep = db.prepare(`SELECT * FROM sleep_entries WHERE user_id = ? AND date = ?`).get(userId, date) as Record<string, number> | undefined;
+  const recovery = (db.prepare(`SELECT * FROM recovery_entries WHERE user_id = ? AND date = ?`).get(userId, date)
+    ?? db.prepare(`SELECT * FROM recovery_entries WHERE user_id = ? ORDER BY date DESC LIMIT 1`).get(userId)) as Record<string, number> | undefined;
+  const sleep = (db.prepare(`SELECT * FROM sleep_entries WHERE user_id = ? AND date = ?`).get(userId, date)
+    ?? db.prepare(`SELECT * FROM sleep_entries WHERE user_id = ? ORDER BY date DESC LIMIT 1`).get(userId)) as Record<string, number> | undefined;
   const lifestyle = db.prepare(`SELECT * FROM lifestyle_entries WHERE user_id = ? AND date = ?`).get(userId, date) as Record<string, number> | undefined;
 
   const nutritionToday = getMealTotals(userId, date, date);
-  const profile = db.prepare(`SELECT * FROM user_profile WHERE user_id = ?`).get(userId) as Record<string, number> | undefined;
+  const targets = getEffectiveTargets(userId);
   const weightTrend = getWeightTrend(userId);
   const training = getTrainingLoad(userId, 28);
   const academic = getAcademicWorkload(userId);
 
-  const recoveryScore = recovery?.recovery_score ?? 50;
-  const sleepScore = sleep?.performance_pct ?? sleep?.duration_hours ? Math.min(100, (sleep.duration_hours / 8) * 100) : 50;
-  const strain = recovery?.strain ?? 10;
+  const hasRecovery = recovery?.recovery_score != null;
+  const hasSleep = sleep?.performance_pct != null || sleep?.duration_hours != null;
+  const hasNutrition = nutritionToday.mealCount > 0;
 
-  const proteinTarget = profile?.target_protein_g ?? 150;
-  const calorieTarget = profile?.target_calories ?? 2500;
-  const proteinPct = proteinTarget > 0 ? (nutritionToday.protein_g / proteinTarget) * 100 : 50;
-  const caloriePct = calorieTarget > 0 ? (nutritionToday.calories / calorieTarget) * 100 : 50;
+  if (!hasRecovery && !hasSleep && !hasNutrition && !weightTrend.current) {
+    return {};
+  }
 
-  const athleticReadiness = clamp(
-    recoveryScore * 0.35 + sleepScore * 0.25 + proteinPct * 0.15 +
+  const recoveryScore = recovery?.recovery_score ?? null;
+  const sleepScore = sleep?.performance_pct ?? (sleep?.duration_hours ? Math.min(100, (sleep.duration_hours / 8) * 100) : null);
+  const strain = recovery?.strain ?? 0;
+
+  const proteinTarget = targets.protein ?? 150;
+  const calorieTarget = targets.calories ?? 2500;
+  const proteinPct = proteinTarget > 0 ? (nutritionToday.protein_g / proteinTarget) * 100 : 0;
+  const caloriePct = calorieTarget > 0 ? (nutritionToday.calories / calorieTarget) * 100 : 0;
+
+  const rScore = recoveryScore ?? 50;
+  const sScore = sleepScore ?? 50;
+
+  const athleticReadiness = hasRecovery || hasSleep ? clamp(
+    (recoveryScore ?? sScore) * 0.35 + (sleepScore ?? rScore) * 0.25 + proteinPct * 0.15 +
     (100 - Math.min(strain * 3, 80)) * 0.15 + (100 - training.acwr * 30) * 0.10
-  );
+  ) : undefined;
 
-  const growthScore = clamp(
-    (weightTrend.weeklyChange > 0 ? 60 : 30) + proteinPct * 0.2 + recoveryScore * 0.2
-  );
+  const growthScore = weightTrend.current ? clamp(
+    (weightTrend.weeklyChange > 0 ? 60 : 30) + proteinPct * 0.2 + (recoveryScore ?? 50) * 0.2
+  ) : undefined;
 
-  const bulkQuality = clamp(
+  const bulkQuality = targets.configured ? clamp(
     proteinPct * 0.35 + (caloriePct > 100 && caloriePct < 120 ? 80 : 50) * 0.25 +
     (weightTrend.weeklyChange >= 0.1 && weightTrend.weeklyChange <= 0.5 ? 80 : 40) * 0.25 +
-    recoveryScore * 0.15
-  );
+    (recoveryScore ?? 50) * 0.15
+  ) : undefined;
 
   const studentAthleteScore = clamp(
-    athleticReadiness * 0.3 + (100 - academic.workloadScore) * 0.2 +
-    proteinPct * 0.15 + sleepScore * 0.2 + training.consistency * 0.15
+    (athleticReadiness ?? 50) * 0.3 + (100 - academic.workloadScore) * 0.2 +
+    proteinPct * 0.15 + (sleepScore ?? 50) * 0.2 + training.consistency * 0.15
   );
 
-  const fatigueScore = clamp(
-    (100 - recoveryScore) * 0.3 + strain * 2 + academic.stressEstimate * 0.25 +
+  const fatigueScore = hasRecovery ? clamp(
+    (100 - (recoveryScore ?? 50)) * 0.3 + strain * 2 + academic.stressEstimate * 0.25 +
     (sleep?.sleep_debt_hours ?? 0) * 10 + (lifestyle?.caffeine_mg ?? 0) / 5
-  );
+  ) : undefined;
 
   const schoolLifeBalance = clamp(
-    100 - Math.abs(training.weeklySessions * 10 - 50) - academic.workloadScore * 0.3 + recoveryScore * 0.2
+    100 - Math.abs(training.weeklySessions * 10 - 50) - academic.workloadScore * 0.3 + (recoveryScore ?? 50) * 0.2
   );
 
-  const hydrationScore = clamp(((lifestyle?.water_ml ?? 0) / (profile?.target_water_ml ?? 3000)) * 100);
+  const hydrationScore = lifestyle?.water_ml ? clamp((lifestyle.water_ml / targets.water_ml) * 100) : undefined;
 
-  const performancePotential = clamp(
-    athleticReadiness * 0.4 + studentAthleteScore * 0.3 + (100 - fatigueScore) * 0.3
-  );
+  const performancePotential = athleticReadiness != null ? clamp(
+    athleticReadiness * 0.4 + studentAthleteScore * 0.3 + (100 - (fatigueScore ?? 50)) * 0.3
+  ) : undefined;
 
-  const readinessForecast = clamp(recoveryScore * 0.5 + sleepScore * 0.3 + (100 - strain * 2) * 0.2);
+  const readinessForecast = hasRecovery ? clamp((recoveryScore ?? 50) * 0.5 + (sleepScore ?? 50) * 0.3 + (100 - strain * 2) * 0.2) : undefined;
 
   return {
-    athletic_readiness: Math.round(athleticReadiness),
-    growth_score: Math.round(growthScore),
-    bulk_quality: Math.round(bulkQuality),
+    athletic_readiness: athleticReadiness != null ? Math.round(athleticReadiness) : undefined,
+    growth_score: growthScore != null ? Math.round(growthScore) : undefined,
+    bulk_quality: bulkQuality != null ? Math.round(bulkQuality) : undefined,
     student_athlete_score: Math.round(studentAthleteScore),
-    performance_potential: Math.round(performancePotential),
-    fatigue_score: Math.round(fatigueScore),
+    performance_potential: performancePotential != null ? Math.round(performancePotential) : undefined,
+    fatigue_score: fatigueScore != null ? Math.round(fatigueScore) : undefined,
     academic_stress: Math.round(academic.stressEstimate),
     school_life_balance: Math.round(schoolLifeBalance),
-    hydration_score: Math.round(hydrationScore),
-    readiness_forecast: Math.round(readinessForecast),
+    hydration_score: hydrationScore != null ? Math.round(hydrationScore) : undefined,
+    readiness_forecast: readinessForecast != null ? Math.round(readinessForecast) : undefined,
   };
 }
 
@@ -187,19 +208,20 @@ export function saveDailyScores(userId: string, date: string, scores: DailyScore
 
 export function buildUnifiedContext(userId: string): UnifiedContext {
   const profileRow = db.prepare(`SELECT * FROM user_profile WHERE user_id = ?`).get(userId) as Record<string, unknown> | undefined;
-  const profile = profileRow ? {
-    ...profileRow,
-    dietary_restrictions: JSON.parse((profileRow.dietary_restrictions as string) || '[]'),
-    favorite_foods: JSON.parse((profileRow.favorite_foods as string) || '[]'),
-    preferences: JSON.parse((profileRow.preferences as string) || '{}'),
-  } : null;
+  const profile = parseProfileRow(profileRow) as UnifiedContext['profile'];
 
   const latestWeight = db.prepare(`SELECT * FROM weight_entries WHERE user_id = ? ORDER BY recorded_at DESC LIMIT 1`).get(userId) as UnifiedContext['latestWeight'];
   const weightTrend = getWeightTrend(userId);
 
-  const recovery = db.prepare(`SELECT * FROM recovery_entries WHERE user_id = ? AND date >= ? ORDER BY date DESC LIMIT 30`).all(userId, daysAgo(30)) as UnifiedContext['recovery'];
-  const sleep = db.prepare(`SELECT * FROM sleep_entries WHERE user_id = ? AND date >= ? ORDER BY date DESC LIMIT 30`).all(userId, daysAgo(30)) as UnifiedContext['sleep'];
-  const workouts = db.prepare(`SELECT * FROM workouts WHERE user_id = ? AND date >= ? ORDER BY date DESC LIMIT 50`).all(userId, daysAgo(30)) as UnifiedContext['workouts'];
+  const recovery = db.prepare(`
+    SELECT * FROM recovery_entries WHERE user_id = ? ORDER BY date DESC LIMIT 500
+  `).all(userId) as UnifiedContext['recovery'];
+  const sleep = db.prepare(`
+    SELECT * FROM sleep_entries WHERE user_id = ? ORDER BY date DESC LIMIT 500
+  `).all(userId) as UnifiedContext['sleep'];
+  const workouts = db.prepare(`
+    SELECT * FROM workouts WHERE user_id = ? ORDER BY date DESC LIMIT 500
+  `).all(userId) as UnifiedContext['workouts'];
   const strength = db.prepare(`SELECT * FROM strength_entries WHERE user_id = ? ORDER BY recorded_at DESC LIMIT 30`).all(userId) as UnifiedContext['strength'];
 
   const t = today();
@@ -220,10 +242,22 @@ export function buildUnifiedContext(userId: string): UnifiedContext {
     SELECT COUNT(*) as c FROM calendar_events WHERE user_id = ? AND date(start_time) = ? AND event_type = 'match'
   `).get(userId, t) as { c: number };
 
-  const hasExamThisWeek = academic.items.some(i => i.type === 'exam');
+  const calendarExamsThisWeek = db.prepare(`
+    SELECT COUNT(*) as c FROM calendar_events
+    WHERE user_id = ? AND event_type = 'exam' AND start_time >= datetime('now') AND start_time <= datetime('now', '+7 days')
+  `).get(userId) as { c: number };
+
+  const hasExamThisWeek = academic.items.some(i => i.type === 'exam') || calendarExamsThisWeek.c > 0;
+
+  const recentEmails = db.prepare(`
+    SELECT title, description, start_time FROM calendar_events
+    WHERE user_id = ? AND source = 'gmail' ORDER BY start_time DESC LIMIT 5
+  `).all(userId) as { title: string; description?: string; start_time: string }[];
 
   const scores = computeDailyScores(userId, t);
-  saveDailyScores(userId, t, scores);
+  if (Object.keys(scores).length > 0) {
+    saveDailyScores(userId, t, scores);
+  }
 
   const correlations = db.prepare(`
     SELECT metric_a, metric_b, correlation, description FROM correlations
@@ -241,7 +275,7 @@ export function buildUnifiedContext(userId: string): UnifiedContext {
   `).all(userId, t) as UnifiedContext['predictions'];
 
   return {
-    profile: profile as UnifiedContext['profile'],
+    profile,
     latestWeight,
     weightTrend,
     recovery,
@@ -251,7 +285,7 @@ export function buildUnifiedContext(userId: string): UnifiedContext {
     strength,
     academic: { items: academic.items as UnifiedContext['academic']['items'], workloadScore: academic.workloadScore, stressEstimate: academic.stressEstimate },
     lifestyle,
-    calendar: { upcoming, hasMatchToday: hasMatchToday.c > 0, hasExamThisWeek },
+    calendar: { upcoming, hasMatchToday: hasMatchToday.c > 0, hasExamThisWeek, recentEmails },
     scores,
     correlations,
     insights,
@@ -260,9 +294,8 @@ export function buildUnifiedContext(userId: string): UnifiedContext {
 }
 
 export function getNutritionAnalytics(userId: string) {
-  const profile = db.prepare(`SELECT * FROM user_profile WHERE user_id = ?`).get(userId) as Record<string, number> | undefined;
-  const weight = db.prepare(`SELECT weight_kg FROM weight_entries WHERE user_id = ? ORDER BY recorded_at DESC LIMIT 1`).get(userId) as { weight_kg: number } | undefined;
-  const weightKg = weight?.weight_kg ?? 75;
+  const targets = getEffectiveTargets(userId);
+  const weightKg = targets.weightKg;
 
   const todayTotals = getMealTotals(userId, today(), today());
   const weekTotals = getMealTotals(userId, daysAgo(7), today());
@@ -276,20 +309,21 @@ export function getNutritionAnalytics(userId: string) {
     week: weekTotals,
     month: monthTotals,
     perKg: {
-      protein: weightKg > 0 ? Math.round((todayTotals.protein_g / weightKg) * 10) / 10 : 0,
-      carbs: weightKg > 0 ? Math.round((todayTotals.carbs_g / weightKg) * 10) / 10 : 0,
-      fat: weightKg > 0 ? Math.round((todayTotals.fat_g / weightKg) * 10) / 10 : 0,
-      calories: weightKg > 0 ? Math.round((todayTotals.calories / weightKg) * 10) / 10 : 0,
+      protein: weightKg ? Math.round((todayTotals.protein_g / weightKg) * 10) / 10 : 0,
+      carbs: weightKg ? Math.round((todayTotals.carbs_g / weightKg) * 10) / 10 : 0,
+      fat: weightKg ? Math.round((todayTotals.fat_g / weightKg) * 10) / 10 : 0,
+      calories: weightKg ? Math.round((todayTotals.calories / weightKg) * 10) / 10 : 0,
     },
     targets: {
-      calories: profile?.target_calories ?? 2500,
-      protein: profile?.target_protein_g ?? Math.round(weightKg * 2),
-      carbs: profile?.target_carbs_g ?? Math.round(weightKg * 4),
-      fat: profile?.target_fat_g ?? Math.round(weightKg * 1),
+      calories: targets.calories,
+      protein: targets.protein,
+      carbs: targets.carbs,
+      fat: targets.fat,
     },
+    configured: targets.configured,
     adherence: {
-      protein: profile?.target_protein_g ? Math.round((todayTotals.protein_g / profile.target_protein_g) * 100) : 0,
-      calories: profile?.target_calories ? Math.round((todayTotals.calories / profile.target_calories) * 100) : 0,
+      protein: targets.protein ? Math.round((todayTotals.protein_g / targets.protein) * 100) : 0,
+      calories: targets.calories ? Math.round((todayTotals.calories / targets.calories) * 100) : 0,
     },
     weeklyAvg: {
       calories: Math.round(weekTotals.calories / daysInWeek),
@@ -309,39 +343,47 @@ export function getRecoveryAnalytics(userId: string) {
     SELECT r.*, s.duration_hours, s.performance_pct, s.sleep_debt_hours
     FROM recovery_entries r
     LEFT JOIN sleep_entries s ON r.user_id = s.user_id AND r.date = s.date
-    WHERE r.user_id = ? AND r.date >= ? ORDER BY r.date DESC LIMIT 30
-  `).all(userId, daysAgo(30)) as Record<string, number>[];
+    WHERE r.user_id = ? ORDER BY r.date DESC LIMIT 500
+  `).all(userId) as Record<string, number>[];
 
-  const recoveryValues = entries.map(e => e.recovery_score).filter(Boolean);
-  const hrvValues = entries.map(e => e.hrv_ms).filter(Boolean);
-  const sleepValues = entries.map(e => e.duration_hours).filter(Boolean);
+  const recoveryValues = entries.map(e => e.recovery_score).filter(v => v != null && v > 0);
+  const hrvValues = entries.map(e => e.hrv_ms).filter(v => v != null && v > 0);
+  const sleepValues = entries.map(e => e.duration_hours).filter(v => v != null && v > 0);
+  const strainValues = entries.map(e => e.strain).filter(v => v != null && v > 0);
 
-  const avgRecovery = avg(recoveryValues);
-  const recoveryVolatility = recoveryValues.length > 1
+  const hasData = recoveryValues.length > 0;
+  const avgRecovery = hasData ? avg(recoveryValues) : null;
+  const recoveryVolatility = recoveryValues.length > 1 && avgRecovery != null
     ? Math.round(Math.sqrt(recoveryValues.reduce((s, v) => s + (v - avgRecovery) ** 2, 0) / recoveryValues.length) * 10) / 10
     : 0;
 
   const totalSleepDebt = entries.reduce((s, e) => s + (e.sleep_debt_hours || 0), 0);
-  const avgStrain = avg(entries.map(e => e.strain).filter(Boolean));
+  const avgStrain = strainValues.length > 0 ? avg(strainValues) : null;
 
-  const latestRecovery = recoveryValues[0] ?? 50;
+  const latestRecovery = recoveryValues[0] ?? null;
   const prevRecovery = recoveryValues[1] ?? latestRecovery;
-  const momentum = latestRecovery - prevRecovery;
+  const momentum = latestRecovery != null && prevRecovery != null ? latestRecovery - prevRecovery : null;
 
-  const burnoutRisk = latestRecovery < 33 && avgStrain > 15 ? 'high'
-    : latestRecovery < 50 && avgStrain > 12 ? 'moderate' : 'low';
+  const burnoutRisk = !hasData ? 'unknown'
+    : latestRecovery != null && latestRecovery < 33 && (avgStrain ?? 0) > 15 ? 'high'
+    : latestRecovery != null && latestRecovery < 50 && (avgStrain ?? 0) > 12 ? 'moderate' : 'low';
+
+  const avgSleepHours = sleepValues.length > 0 ? avg(sleepValues) : null;
 
   return {
-    trends: entries.slice(0, 14).reverse(),
-    avgRecovery: Math.round(avgRecovery),
-    avgHrv: Math.round(avg(hrvValues)),
-    avgSleep: Math.round(avg(sleepValues) * 10) / 10,
+    hasData,
+    trends: sanitizeRecoveryTrend(entries.slice(0, 90).reverse() as Record<string, unknown>[]),
+    avgRecovery: avgRecovery != null ? Math.round(avgRecovery) : null,
+    avgHrv: hrvValues.length > 0 ? Math.round(avg(hrvValues)) : null,
+    avgSleep: avgSleepHours != null ? round(avgSleepHours, 1) : null,
+    avgSleepDisplay: avgSleepHours != null ? fmtSleepHours(avgSleepHours) : null,
     recoveryVolatility,
-    sleepDebt: Math.round(totalSleepDebt * 10) / 10,
-    recoveryMomentum: Math.round(momentum),
-    recoveryToStrainRatio: avgStrain > 0 ? Math.round((avgRecovery / avgStrain) * 10) / 10 : 0,
+    sleepDebt: round(totalSleepDebt, 1),
+    sleepDebtDisplay: fmtSleepHours(totalSleepDebt),
+    recoveryMomentum: momentum != null ? Math.round(momentum) : null,
+    recoveryToStrainRatio: avgRecovery != null && avgStrain != null && avgStrain > 0 ? round(avgRecovery / avgStrain, 1) : null,
     burnoutRisk,
-    readinessScore: Math.round(latestRecovery * 0.6 + (100 - avgStrain * 3) * 0.4),
+    readinessScore: latestRecovery != null ? Math.round(latestRecovery * 0.6 + (100 - (avgStrain ?? 0) * 3) * 0.4) : null,
   };
 }
 

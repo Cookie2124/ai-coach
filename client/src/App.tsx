@@ -13,6 +13,7 @@ import InsightsPage from './pages/InsightsPage';
 import ReportsPage from './pages/ReportsPage';
 import IntegrationsPage from './pages/IntegrationsPage';
 import SettingsPage from './pages/SettingsPage';
+import SchedulePage from './pages/SchedulePage';
 import { LoadingSpinner } from './components/ui';
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
@@ -36,6 +37,7 @@ export default function App() {
               <Route path="training" element={<TrainingPage />} />
               <Route path="recovery" element={<RecoveryPage />} />
               <Route path="academic" element={<AcademicPage />} />
+              <Route path="schedule" element={<SchedulePage />} />
               <Route path="insights" element={<InsightsPage />} />
               <Route path="reports" element={<ReportsPage />} />
               <Route path="integrations" element={<IntegrationsPage />} />

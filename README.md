@@ -45,22 +45,18 @@ npm start
 
 Serves the built frontend from the API server at http://localhost:3001.
 
-## AI Setup (Optional)
+## AI Setup (OpenRouter)
 
-Install Ollama and pull a model:
+AiCoach uses [OpenRouter](https://openrouter.ai) for AI capabilities. Set your API key in `.env`:
 
 ```bash
-ollama pull llama3.2
+OPENROUTER_API_KEY=sk-or-v1-your-key
+OPENROUTER_MODEL=openai/gpt-5.6-luna
 ```
 
-AiCoach connects to Ollama at `localhost:11434` by default. Without Ollama, the app still works with a rule-based fallback that uses all interconnected data.
+You can also configure the API key and model in **Settings → AI** within the app.
 
-Environment variables:
-- `OLLAMA_URL` — Ollama API URL (default: http://localhost:11434)
-- `OLLAMA_MODEL` — Model name (default: llama3.2)
-- `AICOACH_DATA_DIR` — Data directory (default: ./data)
-- `JWT_SECRET` — Auth secret (change in production)
-- `PORT` — Server port (default: 3001)
+The AI has full access to all your interconnected data: recovery, nutrition, training, academics, calendar, and discovered correlations.
 
 ## Architecture
 
@@ -100,16 +96,24 @@ All data is stored permanently in `./data/aicoach.db`. This includes:
 
 ## Integrations
 
-| Service | Status | Data Imported |
-|---------|--------|---------------|
-| WHOOP | Supported | Recovery, HRV, sleep, strain, workouts |
-| Google Calendar | Configurable | Events |
-| Outlook Calendar | Configurable | Events |
-| Apple Health | Optional | Health metrics |
-| Garmin | Optional | Activity data |
-| Strava | Optional | Activity data |
+Connect services through the **Integrations** page in the web app:
 
-The app functions fully without any integrations — connectors enhance data when available.
+| Service | Connect Method | Data Imported |
+|---------|---------------|---------------|
+| WHOOP | OAuth or access token | Recovery, HRV, sleep, strain, all workouts |
+| Google Calendar | OAuth or token | Events (matches, exams auto-detected) |
+| Outlook Calendar | OAuth or token | Events |
+| Gmail | OAuth or token | Recent emails for context |
+| Outlook Email | OAuth or token | Recent emails for context |
+| Strava | OAuth or token | Activities (running, cycling, etc.) |
+| Garmin | OAuth or token | Activities |
+| Apple Health | File import (XML/JSON) | Weight, sleep, heart rate, workouts |
+
+**OAuth setup:** Add client credentials to `.env` for one-click connect. Without OAuth credentials, use manual token entry on each integration card.
+
+OAuth callback URL: `http://localhost:3001/api/integrations/oauth/callback`
+
+Environment variables — see `.env.example` for full list.
 
 ## License
 

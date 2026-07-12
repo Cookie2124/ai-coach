@@ -163,7 +163,7 @@ export interface UnifiedContext {
   strength: StrengthEntry[];
   academic: { items: AcademicItem[]; workloadScore: number; stressEstimate: number };
   lifestyle: LifestyleEntry[];
-  calendar: { upcoming: unknown[]; hasMatchToday: boolean; hasExamThisWeek: boolean };
+  calendar: { upcoming: unknown[]; hasMatchToday: boolean; hasExamThisWeek: boolean; recentEmails?: { title: string; description?: string; start_time: string }[] };
   scores: DailyScores;
   correlations: { metric_a: string; metric_b: string; correlation: number; description: string }[];
   insights: { title: string; content: string; severity: string }[];
