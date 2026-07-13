@@ -68,6 +68,36 @@ For phone access and OAuth (WHOOP, Google) without SSH tunnels:
 
 The Node app still listens on HTTP port 3001 locally; Tailscale terminates TLS.
 
+### PM2 on Raspberry Pi
+
+```bash
+# First time or after git pull
+npm run build
+pm2 start ecosystem.config.cjs
+pm2 save
+pm2 startup   # follow the printed command once
+```
+
+**Port already in use (`EADDRINUSE 3001`)?** Usually a duplicate Node/PM2 process:
+
+```bash
+chmod +x scripts/pm2-restart.sh
+./scripts/pm2-restart.sh
+```
+
+Or manually:
+
+```bash
+pm2 stop aicoach
+fuser -k 3001/tcp    # or: kill -9 $(lsof -t -i:3001)
+pm2 delete aicoach
+npm run build
+pm2 start ecosystem.config.cjs
+pm2 save
+```
+
+Only run **one** of: `pm2 start aicoach`, `npm start`, or `npm run dev` — not multiple at once.
+
 ## AI Setup (OpenRouter)
 
 AiCoach uses [OpenRouter](https://openrouter.ai) for AI capabilities. Set your API key in `.env`:
