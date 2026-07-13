@@ -13,7 +13,8 @@ import integrationRoutes from './routes/integrations.js';
 import learningRoutes from './routes/learning.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const PORT = process.env.PORT || 3001;
+const PORT = process.env.PORT || '3001';
+const HOST = process.env.LISTEN_HOST || '0.0.0.0';
 
 initializeDatabase();
 
@@ -40,8 +41,8 @@ app.get('*', (_req, res) => {
   });
 });
 
-app.listen(Number(PORT), '0.0.0.0', () => {
-  console.log(`\n  AiCoach Server running at http://localhost:${PORT}`);
+app.listen(Number(PORT), HOST, () => {
+  console.log(`\n  AiCoach Server running at http://${HOST === '0.0.0.0' ? 'localhost' : HOST}:${PORT}`);
   if (env.APP_URL && !env.APP_URL.includes('localhost')) {
     console.log(`  Public URL: ${env.APP_URL.replace(/\/$/, '')}`);
   }

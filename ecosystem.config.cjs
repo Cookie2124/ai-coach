@@ -13,6 +13,9 @@ module.exports = {
     kill_timeout: 5000,
     env: {
       NODE_ENV: 'production',
+      // Use 3002 when Tailscale HTTPS serves public port 3001 (see scripts/setup-tailscale-https.sh)
+      PORT: '3002',
+      LISTEN_HOST: '127.0.0.1',
     },
   }],
 };
