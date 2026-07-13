@@ -7,13 +7,16 @@ import { applyDefaultProfileTargets } from '../analytics/profile.js';
 const WHOOP_API = 'https://api.prod.whoop.com/developer/v2';
 /** WHOOP launched ~2015 — fetch everything from before membership could exist */
 const WHOOP_HISTORY_START = '2014-01-01T00:00:00.000Z';
-const INCREMENTAL_SYNC_DAYS = 30;
-const FULL_SYNC_CHUNK_DAYS = 180;
+const INCREMENTAL_SYNC_DAYS = 14;
+const FULL_SYNC_CHUNK_DAYS = 90;
+/** ~90 req/min — WHOOP default limit is 100/min per client */
+const WHOOP_MIN_REQUEST_INTERVAL_MS = 670;
+const WHOOP_429_MAX_RETRIES = 8;
 
 export interface WhoopSyncOptions {
   /** Import all historical data from account creation to now */
   fullHistory?: boolean;
-  /** Days back for incremental sync (default 30) */
+  /** Days back for incremental sync (default 14) */
   days?: number;
 }
 
@@ -31,6 +34,55 @@ interface ImportCounts {
 }
 
 const whoopTokenLocks = new Map<string, Promise<string>>();
+const whoopSyncLocks = new Map<string, Promise<WhoopSyncResult>>();
+
+export interface WhoopSyncResult {
+  recovery: number;
+  sleep: number;
+  workouts: number;
+  weight: number;
+  cycles: number;
+  stats: {
+    recovery: { c: number; earliest: string; latest: string };
+    sleep: { c: number; earliest: string; latest: string };
+    workouts: { c: number; earliest: string; latest: string };
+    config: Record<string, unknown>;
+  };
+  errors?: string[];
+  fullHistory?: boolean;
+}
+let lastWhoopRequestAt = 0;
+
+function sleep(ms: number) {
+  return new Promise<void>(resolve => setTimeout(resolve, ms));
+}
+
+async function whoopPace() {
+  const now = Date.now();
+  const wait = lastWhoopRequestAt + WHOOP_MIN_REQUEST_INTERVAL_MS - now;
+  if (wait > 0) await sleep(wait);
+  lastWhoopRequestAt = Date.now();
+}
+
+function parseWhoopRetryMs(response: Response): number {
+  const retryAfter = response.headers.get('Retry-After');
+  if (retryAfter) {
+    const seconds = Number(retryAfter);
+    if (!Number.isNaN(seconds) && seconds > 0) return seconds * 1000;
+    const dateMs = Date.parse(retryAfter);
+    if (!Number.isNaN(dateMs)) return Math.max(1000, dateMs - Date.now());
+  }
+  const reset = response.headers.get('X-RateLimit-Reset');
+  if (reset) {
+    const seconds = Number(reset);
+    if (!Number.isNaN(seconds) && seconds > 0) return seconds * 1000;
+  }
+  return 5000;
+}
+
+export function isWhoopSyncInProgress(userId: string): boolean {
+  return whoopSyncLocks.has(userId);
+}
 
 async function getWhoopToken(userId: string, forceRefresh = false): Promise<string> {
   const pending = whoopTokenLocks.get(userId);
@@ -85,18 +137,38 @@ function saveWhoopSyncMeta(userId: string, meta: Record<string, unknown>) {
 }
 
 async function whoopFetch<T = unknown>(endpoint: string, token: string, userId?: string): Promise<T> {
-  const response = await fetch(`${WHOOP_API}${endpoint}`, {
-    headers: { Authorization: `Bearer ${token}` },
-  });
-  if (response.status === 401 && userId) {
-    const freshToken = await getWhoopToken(userId, true);
-    return whoopFetch<T>(endpoint, freshToken);
+  let activeToken = token;
+
+  for (let attempt = 0; attempt <= WHOOP_429_MAX_RETRIES; attempt++) {
+    await whoopPace();
+    const response = await fetch(`${WHOOP_API}${endpoint}`, {
+      headers: { Authorization: `Bearer ${activeToken}` },
+    });
+
+    if (response.status === 401 && userId) {
+      activeToken = await getWhoopToken(userId, true);
+      continue;
+    }
+
+    if (response.status === 429) {
+      const waitMs = parseWhoopRetryMs(response) + attempt * 500;
+      console.warn(`[whoop] rate limited on ${endpoint}, waiting ${waitMs}ms (attempt ${attempt + 1})`);
+      if (attempt >= WHOOP_429_MAX_RETRIES) {
+        throw new Error('WHOOP API 429: rate limit exceeded — wait 1–2 minutes and sync again');
+      }
+      await sleep(waitMs);
+      continue;
+    }
+
+    if (!response.ok) {
+      const body = await response.text();
+      throw new Error(`WHOOP API ${response.status}: ${body || response.statusText}`);
+    }
+
+    return response.json() as Promise<T>;
   }
-  if (!response.ok) {
-    const body = await response.text();
-    throw new Error(`WHOOP API ${response.status}: ${body}`);
-  }
-  return response.json() as Promise<T>;
+
+  throw new Error('WHOOP API 429: rate limit exceeded — wait 1–2 minutes and sync again');
 }
 
 async function whoopFetchAll<T>(path: string, token: string, params: Record<string, string>, userId: string): Promise<T[]> {
@@ -106,20 +178,10 @@ async function whoopFetchAll<T>(path: string, token: string, params: Record<stri
 
   do {
     const qs = new URLSearchParams({ ...params, limit: '25', ...(nextToken ? { nextToken } : {}) });
-    try {
-      const page = await whoopFetch<WhoopPage<T>>(`${path}?${qs}`, activeToken, userId);
-      records.push(...(page.records ?? []));
-      nextToken = page.next_token;
-    } catch (e) {
-      if ((e as Error).message.includes('401') && userId) {
-        activeToken = await getWhoopToken(userId, true);
-        const page = await whoopFetch<WhoopPage<T>>(`${path}?${qs}`, activeToken, userId);
-        records.push(...(page.records ?? []));
-        nextToken = page.next_token;
-      } else {
-        throw e;
-      }
-    }
+    const page = await whoopFetch<WhoopPage<T>>(`${path}?${qs}`, activeToken, userId);
+    records.push(...(page.records ?? []));
+    nextToken = page.next_token;
+    if (nextToken) await sleep(200);
   } while (nextToken);
 
   return records;
@@ -311,6 +373,8 @@ async function syncWhoopDateRange(
     errors.push(`cycles: ${(e as Error).message}`);
   }
 
+  await sleep(400);
+
   try {
     const recoveries = await whoopFetchAll<{
       cycle_id: number;
@@ -356,6 +420,8 @@ async function syncWhoopDateRange(
   } catch (e) {
     errors.push(`recovery: ${(e as Error).message}`);
   }
+
+  await sleep(400);
 
   try {
     const sleeps = await whoopFetchAll<{
@@ -413,6 +479,8 @@ async function syncWhoopDateRange(
     errors.push(`sleep: ${(e as Error).message}`);
   }
 
+  await sleep(400);
+
   try {
     const workouts = await whoopFetchAll<{
       id: string;
@@ -455,7 +523,23 @@ export function getWhoopDataStats(userId: string) {
   return { recovery, sleep, workouts, config };
 }
 
-export async function syncWhoopData(userId: string, options?: WhoopSyncOptions) {
+export async function syncWhoopData(userId: string, options?: WhoopSyncOptions): Promise<WhoopSyncResult> {
+  const pending = whoopSyncLocks.get(userId);
+  if (pending) {
+    console.log(`[whoop] sync already running for user=${userId}, waiting`);
+    return pending;
+  }
+
+  const work = syncWhoopDataInner(userId, options);
+  whoopSyncLocks.set(userId, work);
+  try {
+    return await work;
+  } finally {
+    if (whoopSyncLocks.get(userId) === work) whoopSyncLocks.delete(userId);
+  }
+}
+
+async function syncWhoopDataInner(userId: string, options?: WhoopSyncOptions): Promise<WhoopSyncResult> {
   const creds = getCredentials(userId, 'whoop');
   if (!creds.access_token) throw new Error('WHOOP not connected. Click Connect on the Integrations page.');
 
@@ -488,18 +572,18 @@ export async function syncWhoopData(userId: string, options?: WhoopSyncOptions) 
         );
         cursor = chunkEnd;
         chunkIndex++;
-        // Brief pause between chunks to stay under WHOOP rate limits (100/min)
-        if (cursor < endDate) await new Promise(r => setTimeout(r, 300));
+        if (cursor < endDate) await sleep(3000);
       }
 
-      console.log(`WHOOP full history sync: ${chunkIndex} chunks for user ${userId}`);
+      console.log(`[whoop] full history sync: ${chunkIndex} chunks for user ${userId}`);
     } else {
       const days = options?.days ?? INCREMENTAL_SYNC_DAYS;
       const start = new Date(Date.now() - days * 86400000).toISOString();
       await syncWhoopDateRange(userId, token, start, end, imported, errors, cycleDateMap);
     }
 
-    // Profile + body measurements
+    await sleep(400);
+
     try {
       const profile = await whoopFetch<Record<string, unknown>>('/user/profile/basic', token, userId);
       const body = await whoopFetch<{ height_meter: number; weight_kilogram: number; max_heart_rate: number }>(
@@ -536,6 +620,10 @@ export async function syncWhoopData(userId: string, options?: WhoopSyncOptions) 
     }
 
     if (imported.recovery + imported.sleep + imported.workouts === 0 && errors.length > 0) {
+      const all429 = errors.every(e => e.includes('429'));
+      if (all429) {
+        throw new Error('WHOOP rate limit reached. Wait 1–2 minutes, then tap Sync Recent again.');
+      }
       throw new Error(`WHOOP sync failed: ${errors.join('; ')}`);
     }
 

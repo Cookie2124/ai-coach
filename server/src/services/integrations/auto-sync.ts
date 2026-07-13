@@ -1,11 +1,12 @@
 import { syncProvider, SYNC_PROVIDERS } from './index.js';
 import { isGoogleConnected, syncGoogleAll } from './google.js';
+import { isWhoopSyncInProgress } from './whoop.js';
 import { getIntegrationStatus, saveIntegration, type IntegrationCredentials } from './base.js';
 import { runLearningCycle } from '../learning/index.js';
 
 const SYNC_INTERVAL_MS = 30 * 60 * 1000;
 /** Min gap between WHOOP syncs triggered by opening the app */
-const WHOOP_OPEN_SYNC_MS = 60 * 1000;
+const WHOOP_OPEN_SYNC_MS = 5 * 60 * 1000;
 
 const lastSyncByUser = new Map<string, number>();
 const lastWhoopOpenSyncByUser = new Map<string, number>();
@@ -20,9 +21,12 @@ export async function syncWhoopOnAppOpen(userId: string) {
   if (Date.now() - last < WHOOP_OPEN_SYNC_MS) {
     return { skipped: true, reason: 'synced recently on open' };
   }
+  if (isWhoopSyncInProgress(userId)) {
+    return { skipped: true, reason: 'sync already in progress' };
+  }
 
   try {
-    const result = await syncProvider(userId, 'whoop', { days: 14 });
+    const result = await syncProvider(userId, 'whoop', { days: 7 });
     lastWhoopOpenSyncByUser.set(userId, Date.now());
     runLearningCycle(userId);
     console.log(`[whoop] open-sync ok user=${userId}`, result);
@@ -55,6 +59,7 @@ export async function autoSyncIfStale(userId: string, force = false) {
     if (!s.connected || s.provider === 'google_calendar' || s.provider === 'gmail') continue;
     if (!SYNC_PROVIDERS.includes(s.provider)) continue;
     if (s.provider === 'google') continue;
+    if (s.provider === 'whoop') continue; // handled by syncWhoopOnAppOpen
     try {
       results[s.provider] = await syncProvider(userId, s.provider);
     } catch (e) {
