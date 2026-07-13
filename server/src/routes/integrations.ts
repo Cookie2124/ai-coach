@@ -46,6 +46,10 @@ router.get('/oauth/callback', async (req: Request, res: Response) => {
       saveIntegration(userId, provider, tokens, oauthConfig);
     }
 
+    if (provider === 'whoop' && !tokens.refresh_token) {
+      return res.redirect(`${clientUrl}/integrations?error=${encodeURIComponent('WHOOP connected but no refresh token was returned. Disconnect and connect again — the server must request the offline scope.')}`);
+    }
+
     if (provider === 'whoop') {
       try {
         const result = await syncWhoopData(userId, { fullHistory: true });

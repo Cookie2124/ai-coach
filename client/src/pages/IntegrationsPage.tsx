@@ -324,6 +324,19 @@ export default function IntegrationsPage() {
               {getStatus('whoop')?.connected && getStatus('whoop')?.config?.last_sync_error && (
                 <p className="text-sm text-red-600 dark:text-red-400 mt-2">
                   Last sync error: {getStatus('whoop')!.config!.last_sync_error}
+                  {' '}Try disconnecting WHOOP below, then Connect again.
+                </p>
+              )}
+              {getStatus('whoop')?.connected && whoopStats && (whoopStats as { tokenHealth?: { hasRefreshToken?: boolean; oauthConfigured?: boolean } }).tokenHealth && (
+                !(whoopStats as { tokenHealth: { hasRefreshToken: boolean } }).tokenHealth.hasRefreshToken && (
+                  <p className="text-sm text-amber-600 dark:text-amber-400 mt-2">
+                    No refresh token stored — disconnect WHOOP and connect again so sync can keep working.
+                  </p>
+                )
+              )}
+              {getStatus('whoop')?.connected && whoopStats && (whoopStats as { tokenHealth?: { oauthConfigured?: boolean } }).tokenHealth?.oauthConfigured === false && (
+                <p className="text-sm text-amber-600 dark:text-amber-400 mt-2">
+                  Server missing WHOOP_CLIENT_ID / WHOOP_CLIENT_SECRET in .env — add them on the Pi and restart.
                 </p>
               )}
               {(whoopRedirectUri || oauthCallbackUrl) && (
@@ -371,6 +384,9 @@ export default function IntegrationsPage() {
                   className="btn-primary flex items-center gap-1 text-sm"
                 >
                   <RefreshCw className={`w-4 h-4 ${syncing === 'whoop-full' ? 'animate-spin' : ''}`} /> Import All History
+                </button>
+                <button onClick={() => handleDisconnect('whoop')} className="btn-secondary flex items-center gap-1 text-sm text-red-600">
+                  <Unlink className="w-4 h-4" /> Disconnect
                 </button>
               </div>
             )}

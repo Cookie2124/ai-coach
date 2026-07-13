@@ -73,7 +73,7 @@ export const OAUTH_PROVIDERS: Record<string, () => OAuthProviderConfig> = {
     provider: 'whoop',
     authUrl: 'https://api.prod.whoop.com/oauth/oauth2/auth',
     tokenUrl: 'https://api.prod.whoop.com/oauth/oauth2/token',
-    scopes: ['offline', 'read:recovery', 'read:cycles', 'read:sleep', 'read:workout', 'read:profile', 'read:body_measurement'],
+    scopes: ['read:recovery', 'read:cycles', 'read:sleep', 'read:workout', 'read:profile', 'read:body_measurement', 'offline'],
     clientId: env.WHOOP_CLIENT_ID,
     clientSecret: env.WHOOP_CLIENT_SECRET,
   }),
@@ -236,14 +236,17 @@ export async function exchangeCodeForTokens(provider: string, code: string, redi
   }
 
   const data = await response.json() as Record<string, unknown>;
-  return normalizeTokens(data);
+  const tokens = normalizeTokens(data);
+  if (provider === 'whoop' && !tokens.refresh_token) {
+    console.warn('[oauth] WHOOP token exchange returned no refresh_token — user may need to reconnect with offline scope');
+  }
+  return tokens;
 }
 
 export async function refreshOAuthToken(
   provider: string,
   refreshToken: string,
   existingRefresh?: string,
-  redirectUri = OAUTH_CALLBACK,
 ) {
   const config = getProviderConfig(provider);
   if (!config) throw new Error(`Unknown provider: ${provider}`);
@@ -251,16 +254,24 @@ export async function refreshOAuthToken(
     throw new Error(`${provider} OAuth not configured — add client ID and secret to .env, then reconnect.`);
   }
 
+  const rt = refreshToken?.trim();
+  if (!rt) {
+    throw new Error(
+      provider === 'whoop'
+        ? 'WHOOP has no refresh token saved — disconnect WHOOP on Integrations and connect again.'
+        : `${provider} refresh token is missing — reconnect the integration.`,
+    );
+  }
+
   const bodyParams: Record<string, string> = {
     grant_type: 'refresh_token',
-    refresh_token: refreshToken,
-    client_id: config.clientId,
-    client_secret: config.clientSecret,
+    refresh_token: rt,
+    client_id: config.clientId.trim(),
+    client_secret: config.clientSecret.trim(),
   };
 
   if (provider === 'whoop') {
     bodyParams.scope = 'offline';
-    // WHOOP refresh docs: scope only — redirect_uri on refresh causes invalid_request
   }
 
   const response = await fetch(config.tokenUrl, {
@@ -272,15 +283,21 @@ export async function refreshOAuthToken(
     const err = await response.text();
     let message = err;
     try {
-      const parsed = JSON.parse(err) as { error?: string; error_description?: string };
-      if (parsed.error_description) {
+      const parsed = JSON.parse(err) as { error?: string; error_description?: string; error_hint?: string };
+      if (provider === 'whoop' && (parsed.error === 'invalid_request' || parsed.error === 'invalid_grant')) {
+        message = [
+          'WHOOP session expired or refresh token is invalid.',
+          'Disconnect WHOOP on Integrations, then Connect again.',
+          parsed.error_description ?? parsed.error_hint ?? parsed.error,
+        ].filter(Boolean).join(' ');
+      } else if (parsed.error_description) {
         message = `${parsed.error}: ${parsed.error_description}`;
       }
     } catch { /* raw */ }
     throw new Error(`Token refresh failed (${provider}): ${message}`);
   }
   const data = await response.json() as Record<string, unknown>;
-  return normalizeTokens(data, existingRefresh ?? refreshToken);
+  return normalizeTokens(data, existingRefresh ?? rt);
 }
 
 function normalizeTokens(data: Record<string, unknown>, preserveRefresh?: string) {

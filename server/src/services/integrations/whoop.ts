@@ -1,7 +1,7 @@
 import { db } from '../../db/database.js';
 import { generateId } from '../../types/index.js';
-import { getCredentials, refreshTokenIfNeeded, setSyncStatus, saveIntegration, getIntegration } from './base.js';
-import { refreshOAuthToken } from './oauth.js';
+import { getCredentials, setSyncStatus, saveIntegration, getIntegration } from './base.js';
+import { refreshOAuthToken, isOAuthAvailable } from './oauth.js';
 import { applyDefaultProfileTargets } from '../analytics/profile.js';
 
 const WHOOP_API = 'https://api.prod.whoop.com/developer/v2';
@@ -30,20 +30,47 @@ interface ImportCounts {
   cycles: number;
 }
 
+const whoopTokenLocks = new Map<string, Promise<string>>();
+
 async function getWhoopToken(userId: string, forceRefresh = false): Promise<string> {
-  if (forceRefresh) {
+  const pending = whoopTokenLocks.get(userId);
+  if (pending) return pending;
+
+  const work = (async () => {
     const creds = getCredentials(userId, 'whoop');
-    if (!creds.refresh_token) {
-      throw new Error('WHOOP access token expired — disconnect and reconnect on Integrations.');
+    if (!creds.access_token) throw new Error('WHOOP not connected. Click Connect on the Integrations page.');
+
+    const refreshToken = typeof creds.refresh_token === 'string' ? creds.refresh_token.trim() : '';
+    const expired = creds.expires_at != null && creds.expires_at < Date.now() + 60000;
+    const needsRefresh = forceRefresh || expired;
+
+    if (!needsRefresh) return creds.access_token as string;
+
+    if (!refreshToken) {
+      throw new Error('WHOOP has no refresh token — disconnect WHOOP on Integrations and connect again.');
     }
-    const newCreds = await refreshOAuthToken('whoop', creds.refresh_token as string, creds.refresh_token as string);
-    const merged = { ...creds, ...newCreds, refresh_token: newCreds.refresh_token ?? creds.refresh_token };
+    if (!isOAuthAvailable('whoop')) {
+      throw new Error('WHOOP OAuth is not configured on the server — set WHOOP_CLIENT_ID and WHOOP_CLIENT_SECRET in .env, then restart.');
+    }
+
+    const newCreds = await refreshOAuthToken('whoop', refreshToken, refreshToken);
+    const merged = {
+      ...creds,
+      ...newCreds,
+      refresh_token: newCreds.refresh_token ?? refreshToken,
+    };
     const existing = getIntegration(userId, 'whoop');
     const prevConfig = existing?.config ? JSON.parse(existing.config) : {};
     saveIntegration(userId, 'whoop', merged, prevConfig, true);
     return merged.access_token as string;
+  })();
+
+  whoopTokenLocks.set(userId, work);
+  try {
+    return await work;
+  } finally {
+    if (whoopTokenLocks.get(userId) === work) whoopTokenLocks.delete(userId);
   }
-  return refreshTokenIfNeeded(userId, 'whoop', (rt) => refreshOAuthToken('whoop', rt, rt));
 }
 
 function saveWhoopSyncMeta(userId: string, meta: Record<string, unknown>) {
@@ -540,9 +567,19 @@ export function configureWhoopToken(userId: string, accessToken: string, refresh
 }
 
 export async function testWhoopConnection(userId: string) {
+  const creds = getCredentials(userId, 'whoop');
   const token = await getWhoopToken(userId);
   const profile = await whoopFetch('/user/profile/basic', token, userId);
-  return { connected: true, profile };
+  return {
+    connected: true,
+    profile,
+    tokenHealth: {
+      hasAccessToken: !!creds.access_token,
+      hasRefreshToken: typeof creds.refresh_token === 'string' && creds.refresh_token.trim().length > 8,
+      expiresAt: creds.expires_at ?? null,
+      oauthConfigured: isOAuthAvailable('whoop'),
+    },
+  };
 }
 
 export function workoutStrain(w: { strain?: number; duration_minutes?: number }): number {
