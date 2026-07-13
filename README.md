@@ -45,6 +45,29 @@ npm start
 
 Serves the built frontend from the API server at http://localhost:3001.
 
+### Raspberry Pi + Tailscale HTTPS
+
+For phone access and OAuth (WHOOP, Google) without SSH tunnels:
+
+1. Enable **MagicDNS** and **HTTPS certificates** in the [Tailscale admin console](https://login.tailscale.com/admin/dns)
+2. On the Pi, expose the app:
+   ```bash
+   chmod +x scripts/setup-tailscale-https.sh
+   ./scripts/setup-tailscale-https.sh
+   ```
+3. Set in `.env`:
+   ```bash
+   APP_URL=https://pi.tailfa75f0.ts.net:3001
+   CLIENT_URL=https://pi.tailfa75f0.ts.net:3001
+   ```
+4. Open `https://pi.tailfa75f0.ts.net:3001` from any device on your tailnet
+5. Register OAuth redirect URI in WHOOP + Google Cloud:
+   ```
+   https://pi.tailfa75f0.ts.net:3001/api/integrations/oauth/callback
+   ```
+
+The Node app still listens on HTTP port 3001 locally; Tailscale terminates TLS.
+
 ## AI Setup (OpenRouter)
 
 AiCoach uses [OpenRouter](https://openrouter.ai) for AI capabilities. Set your API key in `.env`:
@@ -111,7 +134,9 @@ Connect services through the **Integrations** page in the web app:
 
 **OAuth setup:** Add client credentials to `.env` for one-click connect. Without OAuth credentials, use manual token entry on each integration card.
 
-OAuth callback URL: `http://localhost:3001/api/integrations/oauth/callback`
+OAuth callback URL (local dev): `http://localhost:3001/api/integrations/oauth/callback`
+
+OAuth callback URL (Tailscale HTTPS): `https://pi.tailfa75f0.ts.net:3001/api/integrations/oauth/callback`
 
 Environment variables — see `.env.example` for full list.
 

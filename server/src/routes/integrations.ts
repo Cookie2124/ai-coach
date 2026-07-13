@@ -91,11 +91,18 @@ router.get('/providers', (req, res) => {
         redirectUri: whoopUrls.redirectUri,
         dashboardUrl: 'https://developer-dashboard.whoop.com',
         hints: [
-          'WHOOP only accepts localhost or https redirect URIs — not Tailscale/LAN IPs',
-          'Register the localhost URI shown below in the WHOOP Developer Dashboard',
-          'Connect from localhost (browser on Pi, or SSH tunnel from your PC)',
-          'After connecting once, sync works from your phone too',
+          'Use https://your-pi.your-tailnet.ts.net:3001 with Tailscale HTTPS enabled',
+          'Register the redirect URI shown below in the WHOOP Developer Dashboard',
+          'OAuth works directly from your phone/laptop on the Tailscale HTTPS URL',
           'No trailing slash',
+        ],
+      },
+      google: {
+        redirectUri: urls.redirectUri,
+        hints: [
+          'Use https://your-pi.your-tailnet.ts.net:3001 with Tailscale HTTPS enabled',
+          'Register the redirect URI shown below in Google Cloud Console',
+          'Raw IP addresses (100.x.x.x) are not accepted by Google',
         ],
       },
     },

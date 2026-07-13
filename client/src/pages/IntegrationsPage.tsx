@@ -91,33 +91,39 @@ export default function IntegrationsPage() {
   const isGoogleConnected = () => ['google', 'google_calendar', 'gmail'].some(p => getStatus(p)?.connected);
 
   const isIpHostname = /^(\d{1,3}\.){3}\d{1,3}$/.test(window.location.hostname);
+  const isTailscaleHost = window.location.hostname.endsWith('.ts.net');
+  const isTailscaleHttps = isTailscaleHost && window.location.protocol === 'https:';
+  const isTailscaleHttp = isTailscaleHost && window.location.protocol === 'http:';
   const appPort = window.location.port || '3001';
+  const oauthRedirectUri = oauthCallbackUrl || `https://${window.location.hostname}:${appPort}/api/integrations/oauth/callback`;
   const googleLocalRedirect = `http://localhost:${appPort}/api/integrations/oauth/callback`;
   const google127Redirect = `http://127.0.0.1:${appPort}/api/integrations/oauth/callback`;
 
-  const handleGoogleConnect = () => {
+  const oauthBlockedMessage = (provider: string) => {
     if (isIpHostname) {
-      setMessage({
-        type: 'error',
-        text: `Google does not allow IP addresses (like ${window.location.hostname}) as OAuth redirect URLs. `
-          + `Use SSH tunnel: ssh -L ${appPort}:localhost:${appPort} pi@${window.location.hostname} `
-          + `then open http://localhost:${appPort}/integrations on your computer and connect Google there. `
-          + `Once connected, Calendar/Gmail sync works from your phone too.`,
-      });
+      return `${provider} does not accept IP addresses (like ${window.location.hostname}) as OAuth redirect URLs. `
+        + `Open the app at your Tailscale HTTPS URL instead (e.g. https://pi.tailfa75f0.ts.net:${appPort}/integrations).`;
+    }
+    if (isTailscaleHttp) {
+      return `${provider} OAuth requires HTTPS on Tailscale. `
+        + `Use https://${window.location.hostname}:${appPort}/integrations instead of http.`;
+    }
+    return '';
+  };
+
+  const handleGoogleConnect = () => {
+    const blocked = oauthBlockedMessage('Google');
+    if (blocked) {
+      setMessage({ type: 'error', text: blocked });
       return;
     }
     handleOAuthConnect('google');
   };
 
   const handleWhoopConnect = () => {
-    if (isIpHostname) {
-      setMessage({
-        type: 'error',
-        text: `WHOOP does not accept IP addresses (like ${window.location.hostname}) as OAuth redirect URLs. `
-          + `Use SSH tunnel: ssh -L ${appPort}:localhost:${appPort} pi@${window.location.hostname} `
-          + `then open http://localhost:${appPort}/integrations on your computer and connect WHOOP there. `
-          + `Once connected, sync works from your phone too.`,
-      });
+    const blocked = oauthBlockedMessage('WHOOP');
+    if (blocked) {
+      setMessage({ type: 'error', text: blocked });
       return;
     }
     handleOAuthConnect('whoop');
@@ -250,15 +256,12 @@ export default function IntegrationsPage() {
               </p>
               {!isGoogleConnected() && (
                 <div className="mt-3 space-y-2">
-                  {isIpHostname && (
+                  {(isIpHostname || isTailscaleHttp) && (
                     <div className="p-3 rounded-xl bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800 text-xs text-amber-800 dark:text-amber-200">
-                      <strong>Google blocks IP redirect URLs</strong> (including Tailscale <code>100.x.x.x</code>).
-                      Register <strong>localhost only</strong> in Google Cloud, then connect via one of:
-                      <ul className="list-disc pl-4 mt-1 space-y-1">
-                        <li>Browser on the Pi: <code>http://localhost:{appPort}/integrations</code></li>
-                        <li>SSH tunnel from PC: <code>ssh -L {appPort}:localhost:{appPort} pi@{window.location.hostname}</code> then open <code>http://localhost:{appPort}/integrations</code></li>
-                      </ul>
-                      After connecting once, sync works from your phone.
+                      <strong>{isIpHostname ? 'Google blocks IP redirect URLs' : 'Use HTTPS for OAuth'}</strong>
+                      {isIpHostname && <> (including Tailscale <code>100.x.x.x</code>).</>}
+                      {' '}Open the app at your Tailscale HTTPS URL, e.g.{' '}
+                      <code>https://pi.tailfa75f0.ts.net:{appPort}/integrations</code>
                     </div>
                   )}
                   <details className="text-xs text-gray-500">
@@ -267,9 +270,16 @@ export default function IntegrationsPage() {
                       <li>Go to <a href="https://console.cloud.google.com/apis/credentials" className="text-brand-500 underline" target="_blank" rel="noreferrer">Google Cloud Console</a></li>
                       <li>Create OAuth 2.0 credentials (Web application)</li>
                       <li>Enable <strong>Google Calendar API</strong> and <strong>Gmail API</strong></li>
-                      <li>Add these redirect URIs (Google does <strong>not</strong> allow raw IPs):
-                        <code className="block mt-1 p-2 bg-white dark:bg-gray-800 rounded break-all">{googleLocalRedirect}</code>
-                        <code className="block mt-1 p-2 bg-white dark:bg-gray-800 rounded break-all">{google127Redirect}</code>
+                      <li>Add this redirect URI:
+                        {isTailscaleHttps ? (
+                          <code className="block mt-1 p-2 bg-white dark:bg-gray-800 rounded break-all">{oauthRedirectUri}</code>
+                        ) : (
+                          <>
+                            <code className="block mt-1 p-2 bg-white dark:bg-gray-800 rounded break-all">{googleLocalRedirect}</code>
+                            <code className="block mt-1 p-2 bg-white dark:bg-gray-800 rounded break-all">{google127Redirect}</code>
+                            <span className="block mt-1 text-gray-400">Or your Tailscale HTTPS URL when using MagicDNS certificates.</span>
+                          </>
+                        )}
                       </li>
                       <li>Add <code>GOOGLE_CLIENT_ID</code> and <code>GOOGLE_CLIENT_SECRET</code> to your <code>.env</code></li>
                     </ol>
@@ -322,10 +332,18 @@ export default function IntegrationsPage() {
                     </button>
                   </div>
                   <ul className="mt-2 text-xs text-gray-500 space-y-1 list-disc pl-4">
-                    <li>WHOOP requires <strong>localhost</strong> — IP addresses like Tailscale are not accepted</li>
-                    <li>Connect via browser on the Pi, or SSH tunnel from your PC (same as Google)</li>
-                    <li>After one-time connect, full history sync works from your phone</li>
-                    <li>No trailing slash — restart server after .env changes, then Connect</li>
+                    {isTailscaleHttps ? (
+                      <>
+                        <li>Using Tailscale HTTPS — OAuth works directly from this URL</li>
+                        <li>Register the URI above exactly in WHOOP (no trailing slash)</li>
+                      </>
+                    ) : (
+                      <>
+                        <li>Use <strong>https://your-pi.your-tailnet.ts.net:{appPort}</strong> with Tailscale HTTPS enabled</li>
+                        <li>Raw IP addresses are not accepted — switch to your MagicDNS hostname</li>
+                        <li>No trailing slash — restart server after .env changes, then Connect</li>
+                      </>
+                    )}
                   </ul>
                 </div>
               )}

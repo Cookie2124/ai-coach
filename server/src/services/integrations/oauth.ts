@@ -224,9 +224,9 @@ export async function exchangeCodeForTokens(provider: string, code: string, redi
       const parsed = JSON.parse(err) as { error?: string; error_description?: string };
       if (parsed.error === 'invalid_request') {
         if (parsed.error_description?.includes('redirect_uri')) {
-          message = `WHOOP redirect URI mismatch. Register this exact URL in the WHOOP Developer Dashboard: ${redirectUri}`;
+          message = `${provider} redirect URI mismatch. Register this exact URL in the provider dashboard: ${redirectUri}`;
         } else if (provider === 'whoop') {
-          message = `${parsed.error}: ${parsed.error_description ?? 'Check redirect URI is http://localhost:3001/... (not an IP) and matches WHOOP dashboard exactly'}`;
+          message = `${parsed.error}: ${parsed.error_description ?? 'Check redirect URI matches the provider dashboard exactly (https Tailscale or localhost)'}`;
         }
       } else if (parsed.error_description) {
         message = `${parsed.error}: ${parsed.error_description}`;

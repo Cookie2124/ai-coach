@@ -3,6 +3,7 @@ import express from 'express';
 import cors from 'cors';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { env } from './config/env.js';
 import { initializeDatabase } from './db/database.js';
 import authRoutes from './routes/auth.js';
 import analyticsRoutes from './routes/analytics.js';
@@ -41,6 +42,9 @@ app.get('*', (_req, res) => {
 
 app.listen(Number(PORT), '0.0.0.0', () => {
   console.log(`\n  AiCoach Server running at http://localhost:${PORT}`);
+  if (env.APP_URL && !env.APP_URL.includes('localhost')) {
+    console.log(`  Public URL: ${env.APP_URL.replace(/\/$/, '')}`);
+  }
   console.log(`  Network: http://<your-ip>:${PORT}`);
   console.log(`  Local-first student athlete OS`);
   console.log(`  Data stored locally in ./data/\n`);

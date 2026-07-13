@@ -11,7 +11,7 @@ export const env = {
   JWT_SECRET: process.env.JWT_SECRET || 'aicoach-local-dev-secret',
   APP_URL: process.env.APP_URL || 'http://localhost:3001',
   CLIENT_URL: process.env.CLIENT_URL || 'http://localhost:5173',
-  /** Override OAuth callback if WHOOP dashboard uses a different URI than APP_URL */
+  /** Override OAuth callback if provider dashboard uses a fixed URI */
   OAUTH_REDIRECT_URI: process.env.OAUTH_REDIRECT_URI || '',
 
   OPENROUTER_API_KEY: process.env.OPENROUTER_API_KEY || '',
@@ -35,41 +35,63 @@ export const env = {
 
 export const OAUTH_CALLBACK = env.OAUTH_REDIRECT_URI || `${env.APP_URL.replace(/\/$/, '')}/api/integrations/oauth/callback`;
 
-/** WHOOP only accepts localhost or https redirect URIs — not Tailscale/LAN IPs. */
-export function resolveWhoopOAuthUrls(clientUrl?: string) {
-  const port = env.PORT || '3001';
-  const localhostRedirect = env.OAUTH_REDIRECT_URI || `http://localhost:${port}/api/integrations/oauth/callback`;
-  const urls = resolveOAuthUrls(clientUrl);
+export function isTailscaleHostname(hostname: string): boolean {
+  return hostname.endsWith('.ts.net');
+}
 
-  if (!clientUrl) {
-    return { ...urls, redirectUri: localhostRedirect };
-  }
+export function isLocalOAuthHostname(hostname: string): boolean {
+  return hostname === 'localhost' || hostname === '127.0.0.1';
+}
 
+export function isIpHostname(hostname: string): boolean {
+  return /^(\d{1,3}\.){3}\d{1,3}$/.test(hostname);
+}
+
+/** OAuth providers accept localhost (http) or Tailscale MagicDNS (https). */
+export function isDirectOAuthOrigin(url: URL): boolean {
+  if (isLocalOAuthHostname(url.hostname)) return true;
+  return isTailscaleHostname(url.hostname) && url.protocol === 'https:';
+}
+
+function buildOAuthUrlsFromOrigin(origin: URL) {
+  const port = origin.port || (origin.protocol === 'https:' ? '443' : '80');
+  const defaultPort = origin.protocol === 'https:' ? '443' : '80';
+  const appUrl = port === defaultPort
+    ? `${origin.protocol}//${origin.hostname}`
+    : `${origin.protocol}//${origin.hostname}:${port}`;
+  const redirectUri = env.OAUTH_REDIRECT_URI || `${appUrl}/api/integrations/oauth/callback`;
+  return {
+    clientUrl: origin.origin,
+    appUrl,
+    redirectUri,
+  };
+}
+
+function parseConfiguredAppUrl(): URL | null {
   try {
-    const client = new URL(clientUrl);
-    const isLocal = client.hostname === 'localhost' || client.hostname === '127.0.0.1';
-    if (isLocal) {
-      const redirectUri = env.OAUTH_REDIRECT_URI || `http://${client.hostname}:${port}/api/integrations/oauth/callback`;
-      return {
-        clientUrl: client.origin,
-        appUrl: `${client.protocol}//${client.hostname}:${port}`,
-        redirectUri,
-      };
-    }
-    return { ...urls, redirectUri: localhostRedirect };
+    return new URL(env.APP_URL);
   } catch {
-    return { ...urls, redirectUri: localhostRedirect };
+    return null;
   }
 }
 
-/** Resolve API + OAuth callback URLs from where the user opened the app (e.g. phone on Tailscale). */
+/** Prefer HTTPS Tailscale APP_URL when the browser origin cannot be used for OAuth. */
+function configuredTailscaleOAuthUrls() {
+  const app = parseConfiguredAppUrl();
+  if (app && isTailscaleHostname(app.hostname) && app.protocol === 'https:') {
+    return buildOAuthUrlsFromOrigin(app);
+  }
+  return null;
+}
+
+/** Resolve API + OAuth callback URLs from how the user opened the app. */
 export function resolveOAuthUrls(clientUrl?: string) {
-  const fallbackClient = env.CLIENT_URL.replace(/\/$/, '');
-  const fallbackApp = env.APP_URL.replace(/\/$/, '');
-  const fallbackRedirect = env.OAUTH_REDIRECT_URI || `${fallbackApp}/api/integrations/oauth/callback`;
+  const configuredApp = parseConfiguredAppUrl();
+  const fallbackApp = configuredApp ?? new URL('http://localhost:3001');
+  const fallback = buildOAuthUrlsFromOrigin(fallbackApp);
 
   if (!clientUrl) {
-    return { clientUrl: fallbackClient, appUrl: fallbackApp, redirectUri: fallbackRedirect };
+    return configuredTailscaleOAuthUrls() ?? fallback;
   }
 
   try {
@@ -77,16 +99,40 @@ export function resolveOAuthUrls(clientUrl?: string) {
     if (!['http:', 'https:'].includes(client.protocol)) {
       throw new Error('invalid protocol');
     }
+
+    if (isDirectOAuthOrigin(client)) {
+      return buildOAuthUrlsFromOrigin(client);
+    }
+
+    const tailscaleFallback = configuredTailscaleOAuthUrls();
+    if (tailscaleFallback) {
+      return { ...tailscaleFallback, clientUrl: client.origin };
+    }
+
     const apiPort = env.PORT || '3001';
     const appUrl = `${client.protocol}//${client.hostname}:${apiPort}`;
-    // Always derive callback from how the user opened the app (ignore OAUTH_REDIRECT_URI override)
-    const redirectUri = `${appUrl}/api/integrations/oauth/callback`;
     return {
       clientUrl: client.origin,
       appUrl,
-      redirectUri,
+      redirectUri: env.OAUTH_REDIRECT_URI || `${appUrl}/api/integrations/oauth/callback`,
     };
   } catch {
-    return { clientUrl: fallbackClient, appUrl: fallbackApp, redirectUri: fallbackRedirect };
+    return configuredTailscaleOAuthUrls() ?? fallback;
   }
+}
+
+/** WHOOP accepts localhost (http) or https — including Tailscale MagicDNS. */
+export function resolveWhoopOAuthUrls(clientUrl?: string) {
+  const urls = resolveOAuthUrls(clientUrl);
+  const port = env.PORT || '3001';
+
+  try {
+    const redirect = new URL(urls.redirectUri);
+    if (redirect.protocol === 'https:' || isLocalOAuthHostname(redirect.hostname)) {
+      return urls;
+    }
+  } catch { /* fall through */ }
+
+  const localhostRedirect = env.OAUTH_REDIRECT_URI || `http://localhost:${port}/api/integrations/oauth/callback`;
+  return { ...urls, redirectUri: localhostRedirect };
 }
