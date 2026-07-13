@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { db } from '../db/database.js';
 import { generateId, estimate1RM } from '../types/index.js';
 import { authMiddleware, type AuthRequest } from '../middleware/auth.js';
+import { buildStudyPlan } from '../services/academic/planner.js';
 import { estimateMealNutrition, logMeal } from '../services/nutrition/meals.js';
 
 const router = Router();
@@ -128,10 +129,14 @@ router.post('/lifestyle', (req: AuthRequest, res) => {
 });
 
 // Academic
+router.get('/academic/plan', (req: AuthRequest, res) => {
+  res.json(buildStudyPlan(req.userId!));
+});
+
 router.get('/academic', (req: AuthRequest, res) => {
   const items = db.prepare(`SELECT * FROM academic_items WHERE user_id = ? ORDER BY due_date ASC`).all(req.userId!);
   const sessions = db.prepare(`SELECT * FROM study_sessions WHERE user_id = ? ORDER BY recorded_at DESC LIMIT 30`).all(req.userId!);
-  res.json({ items, sessions });
+  res.json({ items, sessions, studyPlan: buildStudyPlan(req.userId!) });
 });
 
 router.post('/academic', (req: AuthRequest, res) => {

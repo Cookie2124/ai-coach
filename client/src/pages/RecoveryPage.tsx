@@ -48,6 +48,7 @@ export default function RecoveryPage() {
     Sleep: t.duration_hours as number,
     sleepDisplay: t.sleep_display as string,
     Strain: t.strain as number,
+    Stress: t.stress_score as number,
   }));
 
 
@@ -108,7 +109,17 @@ export default function RecoveryPage() {
 
         <StatCard title="Burnout Risk" value={capitalize(String(data?.burnoutRisk ?? '--'))} />
 
+        <StatCard
+          title="Stress (est.)"
+          value={data?.latestStress != null ? `${data.latestStress}%` : '--'}
+          subtitle={data?.avgStress != null ? `avg ${data.avgStress}%` : 'from recovery & strain'}
+        />
+
       </div>
+
+      {typeof data?.stressNote === 'string' && (
+        <p className="text-xs text-gray-500 -mt-2">{data.stressNote}</p>
+      )}
 
 
 
@@ -135,6 +146,7 @@ export default function RecoveryPage() {
                 if (name === 'HRV') return [fmtHrv(v), name];
 
                 if (name === 'Strain') return [fmtStrain(v), name];
+                if (name === 'Stress') return [`${v}%`, name];
 
                 return [fmtPct(v), name];
 
@@ -149,6 +161,8 @@ export default function RecoveryPage() {
               <Line yAxisId="right" type="monotone" dataKey="Sleep" stroke="#0ea5e9" strokeWidth={2} name="Sleep" />
 
               <Line yAxisId="left" type="monotone" dataKey="Strain" stroke="#ef4444" strokeWidth={2} name="Strain" strokeDasharray="4 4" />
+
+              <Line yAxisId="left" type="monotone" dataKey="Stress" stroke="#f97316" strokeWidth={2} name="Stress" strokeDasharray="2 2" />
 
             </LineChart>
 

@@ -374,6 +374,22 @@ export function initializeDatabase() {
     CREATE INDEX IF NOT EXISTS idx_scores_user_date ON daily_scores(user_id, date);
     CREATE INDEX IF NOT EXISTS idx_calendar_user ON calendar_events(user_id, start_time);
   `);
+
+  runMigrations();
+}
+
+function runMigrations() {
+  const recoveryCols = [
+    'stress_score REAL',
+    'spo2_pct REAL',
+    'skin_temp_c REAL',
+  ];
+  for (const def of recoveryCols) {
+    const name = def.split(' ')[0];
+    try {
+      db.exec(`ALTER TABLE recovery_entries ADD COLUMN ${name} ${def.slice(name.length + 1)}`);
+    } catch { /* column exists */ }
+  }
 }
 
 export { DATA_DIR, DB_PATH };

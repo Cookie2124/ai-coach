@@ -4,7 +4,32 @@ import { getIntegrationStatus, saveIntegration, type IntegrationCredentials } fr
 import { runLearningCycle } from '../learning/index.js';
 
 const SYNC_INTERVAL_MS = 30 * 60 * 1000;
+/** Min gap between WHOOP syncs triggered by opening the app (avoids hammering on navigation) */
+const WHOOP_OPEN_SYNC_MS = 3 * 60 * 1000;
+
 const lastSyncByUser = new Map<string, number>();
+const lastWhoopOpenSyncByUser = new Map<string, number>();
+
+/** Sync WHOOP every time the user opens the app (debounced ~3 min). */
+export async function syncWhoopOnAppOpen(userId: string) {
+  const statuses = getIntegrationStatus(userId);
+  const whoopConnected = statuses.some(s => s.provider === 'whoop' && s.connected);
+  if (!whoopConnected) return { skipped: true, reason: 'whoop not connected' };
+
+  const last = lastWhoopOpenSyncByUser.get(userId) ?? 0;
+  if (Date.now() - last < WHOOP_OPEN_SYNC_MS) {
+    return { skipped: true, reason: 'synced recently on open' };
+  }
+
+  try {
+    const result = await syncProvider(userId, 'whoop', { days: 14 });
+    lastWhoopOpenSyncByUser.set(userId, Date.now());
+    runLearningCycle(userId);
+    return { synced: true, result };
+  } catch (e) {
+    return { synced: false, error: (e as Error).message };
+  }
+}
 
 export async function autoSyncIfStale(userId: string, force = false) {
   const last = lastSyncByUser.get(userId) ?? 0;

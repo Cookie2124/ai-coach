@@ -293,26 +293,30 @@ export function buildUnifiedContext(userId: string): UnifiedContext {
   };
 }
 
-export function getNutritionAnalytics(userId: string) {
+export function getNutritionAnalytics(userId: string, date?: string) {
   const targets = getEffectiveTargets(userId);
   const weightKg = targets.weightKg;
+  const selectedDate = date || today();
 
-  const todayTotals = getMealTotals(userId, today(), today());
+  const dayTotals = getMealTotals(userId, selectedDate, selectedDate);
   const weekTotals = getMealTotals(userId, daysAgo(7), today());
   const monthTotals = getMealTotals(userId, daysAgo(30), today());
 
   const daysInWeek = 7;
   const daysInMonth = 30;
+  const calorieTarget = targets.calories ?? 0;
+  const proteinTarget = targets.protein ?? 0;
 
   return {
-    today: todayTotals,
+    date: selectedDate,
+    today: dayTotals,
     week: weekTotals,
     month: monthTotals,
     perKg: {
-      protein: weightKg ? Math.round((todayTotals.protein_g / weightKg) * 10) / 10 : 0,
-      carbs: weightKg ? Math.round((todayTotals.carbs_g / weightKg) * 10) / 10 : 0,
-      fat: weightKg ? Math.round((todayTotals.fat_g / weightKg) * 10) / 10 : 0,
-      calories: weightKg ? Math.round((todayTotals.calories / weightKg) * 10) / 10 : 0,
+      protein: weightKg ? Math.round((dayTotals.protein_g / weightKg) * 10) / 10 : 0,
+      carbs: weightKg ? Math.round((dayTotals.carbs_g / weightKg) * 10) / 10 : 0,
+      fat: weightKg ? Math.round((dayTotals.fat_g / weightKg) * 10) / 10 : 0,
+      calories: weightKg ? Math.round((dayTotals.calories / weightKg) * 10) / 10 : 0,
     },
     targets: {
       calories: targets.calories,
@@ -322,9 +326,20 @@ export function getNutritionAnalytics(userId: string) {
     },
     configured: targets.configured,
     adherence: {
-      protein: targets.protein ? Math.round((todayTotals.protein_g / targets.protein) * 100) : 0,
-      calories: targets.calories ? Math.round((todayTotals.calories / targets.calories) * 100) : 0,
+      protein: proteinTarget ? Math.round((dayTotals.protein_g / proteinTarget) * 100) : 0,
+      calories: calorieTarget ? Math.round((dayTotals.calories / calorieTarget) * 100) : 0,
+      carbs: targets.carbs ? Math.round((dayTotals.carbs_g / targets.carbs) * 100) : 0,
+      fat: targets.fat ? Math.round((dayTotals.fat_g / targets.fat) * 100) : 0,
     },
+    remaining: {
+      calories: calorieTarget ? Math.max(0, Math.round(calorieTarget - dayTotals.calories)) : null,
+      protein: proteinTarget ? Math.max(0, Math.round(proteinTarget - dayTotals.protein_g)) : null,
+    },
+    macroSplit: dayTotals.calories > 0 ? {
+      proteinPct: Math.round((dayTotals.protein_g * 4 / dayTotals.calories) * 100),
+      carbsPct: Math.round((dayTotals.carbs_g * 4 / dayTotals.calories) * 100),
+      fatPct: Math.round((dayTotals.fat_g * 9 / dayTotals.calories) * 100),
+    } : null,
     weeklyAvg: {
       calories: Math.round(weekTotals.calories / daysInWeek),
       protein: Math.round(weekTotals.protein_g / daysInWeek),
@@ -359,6 +374,9 @@ export function getRecoveryAnalytics(userId: string) {
 
   const totalSleepDebt = entries.reduce((s, e) => s + (e.sleep_debt_hours || 0), 0);
   const avgStrain = strainValues.length > 0 ? avg(strainValues) : null;
+  const stressValues = entries.map(e => e.stress_score).filter(v => v != null && v > 0);
+  const latestStress = stressValues[0] ?? null;
+  const avgStress = stressValues.length > 0 ? Math.round(avg(stressValues)) : null;
 
   const latestRecovery = recoveryValues[0] ?? null;
   const prevRecovery = recoveryValues[1] ?? latestRecovery;
@@ -383,6 +401,9 @@ export function getRecoveryAnalytics(userId: string) {
     recoveryMomentum: momentum != null ? Math.round(momentum) : null,
     recoveryToStrainRatio: avgRecovery != null && avgStrain != null && avgStrain > 0 ? round(avgRecovery / avgStrain, 1) : null,
     burnoutRisk,
+    latestStress,
+    avgStress,
+    stressNote: 'Estimated from recovery, strain & HRV — WHOOP app stress is not in the public API',
     readinessScore: latestRecovery != null ? Math.round(latestRecovery * 0.6 + (100 - (avgStrain ?? 0) * 3) * 0.4) : null,
   };
 }

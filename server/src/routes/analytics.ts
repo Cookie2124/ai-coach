@@ -5,7 +5,7 @@ import { authMiddleware, type AuthRequest } from '../middleware/auth.js';
 import { buildUnifiedContext, getNutritionAnalytics, getRecoveryAnalytics, getTrainingLoad, getStrengthAnalytics, getWeightTrend } from '../services/analytics/index.js';
 import { getDashboardSummary } from '../services/analytics/summary.js';
 import { sanitizeRecoveryEntry, sanitizeSleepEntry } from '../utils/format.js';
-import { autoSyncIfStale } from '../services/integrations/auto-sync.js';
+import { autoSyncIfStale, syncWhoopOnAppOpen } from '../services/integrations/auto-sync.js';
 import { runLearningCycle } from '../services/learning/index.js';
 import { runCorrelationEngine, generateInsightsFromCorrelations } from '../services/correlation/index.js';
 import { runAllPredictions } from '../services/predictions/index.js';
@@ -16,7 +16,8 @@ router.use(authMiddleware);
 router.get('/dashboard', async (req: AuthRequest, res) => {
   const userId = req.userId!;
 
-  // Background sync + learning (non-blocking feel — runs if stale)
+  // WHOOP sync every app open + full background sync if stale
+  syncWhoopOnAppOpen(userId).catch(err => console.warn('WHOOP open-sync:', err.message));
   autoSyncIfStale(userId).catch(err => console.warn('Auto-sync:', err.message));
 
   runCorrelationEngine(userId);
@@ -52,7 +53,8 @@ router.get('/dashboard', async (req: AuthRequest, res) => {
 });
 
 router.get('/nutrition', (req: AuthRequest, res) => {
-  res.json(getNutritionAnalytics(req.userId!));
+  const date = typeof req.query.date === 'string' ? req.query.date : undefined;
+  res.json(getNutritionAnalytics(req.userId!, date));
 });
 
 router.get('/recovery', (req: AuthRequest, res) => {

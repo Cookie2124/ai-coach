@@ -82,11 +82,14 @@ function upsertWhoopRecovery(userId: string, date: string, fields: {
   respiratory_rate?: number | null;
   strain?: number | null;
   calories_burned?: number | null;
+  stress_score?: number | null;
+  spo2_pct?: number | null;
+  skin_temp_c?: number | null;
   raw_data?: string;
 }) {
   db.prepare(`
-    INSERT INTO recovery_entries (id, user_id, date, recovery_score, hrv_ms, resting_hr, respiratory_rate, strain, calories_burned, source, raw_data)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'whoop', ?)
+    INSERT INTO recovery_entries (id, user_id, date, recovery_score, hrv_ms, resting_hr, respiratory_rate, strain, calories_burned, stress_score, spo2_pct, skin_temp_c, source, raw_data)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'whoop', ?)
     ON CONFLICT(user_id, date, source) DO UPDATE SET
       recovery_score=COALESCE(excluded.recovery_score, recovery_score),
       hrv_ms=COALESCE(excluded.hrv_ms, hrv_ms),
@@ -94,6 +97,9 @@ function upsertWhoopRecovery(userId: string, date: string, fields: {
       respiratory_rate=COALESCE(excluded.respiratory_rate, respiratory_rate),
       strain=COALESCE(excluded.strain, strain),
       calories_burned=COALESCE(excluded.calories_burned, calories_burned),
+      stress_score=COALESCE(excluded.stress_score, stress_score),
+      spo2_pct=COALESCE(excluded.spo2_pct, spo2_pct),
+      skin_temp_c=COALESCE(excluded.skin_temp_c, skin_temp_c),
       raw_data=COALESCE(excluded.raw_data, raw_data)
   `).run(
     generateId(), userId, date,
@@ -103,8 +109,45 @@ function upsertWhoopRecovery(userId: string, date: string, fields: {
     fields.respiratory_rate ?? null,
     fields.strain ?? null,
     fields.calories_burned ?? null,
+    fields.stress_score ?? null,
+    fields.spo2_pct ?? null,
+    fields.skin_temp_c ?? null,
     fields.raw_data ?? '{}',
   );
+}
+
+/** WHOOP has no public stress API — estimate from recovery, strain, and HRV vs baseline. */
+export function estimateWhoopStressScore(
+  recovery: number | null,
+  strain: number | null,
+  hrv: number | null,
+  avgHrv: number | null,
+): number | null {
+  if (recovery == null && strain == null) return null;
+  let score = 0;
+  let weight = 0;
+  if (recovery != null) {
+    score += (100 - recovery) * 0.45;
+    weight += 0.45;
+  }
+  if (strain != null) {
+    score += Math.min(100, strain * 7.5) * 0.35;
+    weight += 0.35;
+  }
+  if (hrv != null && avgHrv != null && avgHrv > 0) {
+    const ratio = hrv / avgHrv;
+    score += Math.min(100, Math.max(0, (1.15 - ratio) * 80)) * 0.2;
+    weight += 0.2;
+  }
+  return weight > 0 ? Math.round(Math.min(100, Math.max(0, score / weight))) : null;
+}
+
+function getUserAvgHrv(userId: string): number | null {
+  const row = db.prepare(`
+    SELECT AVG(hrv_ms) as avg FROM recovery_entries
+    WHERE user_id = ? AND source = 'whoop' AND hrv_ms IS NOT NULL AND hrv_ms > 0
+  `).get(userId) as { avg: number | null } | undefined;
+  return row?.avg ?? null;
 }
 
 function upsertWhoopWorkout(userId: string, wo: {
@@ -175,6 +218,7 @@ async function syncWhoopDateRange(
   cycleDateMap: Map<number, string>,
 ) {
   const range = { start, end };
+  const avgHrv = getUserAvgHrv(userId);
 
   try {
     const cycles = await whoopFetchAll<{ id: number; start: string; score?: { strain: number; kilojoule: number } }>(
@@ -189,6 +233,17 @@ async function syncWhoopDateRange(
         calories_burned: c.score?.kilojoule ? Math.round(c.score.kilojoule / 4.184) : null,
         raw_data: JSON.stringify(c),
       });
+      // Recompute stress when strain arrives (recovery may have synced first)
+      const row = db.prepare(`
+        SELECT recovery_score, hrv_ms, strain FROM recovery_entries WHERE user_id = ? AND date = ? AND source = 'whoop'
+      `).get(userId, date) as { recovery_score: number | null; hrv_ms: number | null; strain: number | null } | undefined;
+      if (row?.recovery_score != null || c.score?.strain != null) {
+        const stress = estimateWhoopStressScore(row?.recovery_score ?? null, c.score?.strain ?? null, row?.hrv_ms ?? null, avgHrv);
+        if (stress != null) {
+          db.prepare(`UPDATE recovery_entries SET stress_score = ? WHERE user_id = ? AND date = ? AND source = 'whoop'`)
+            .run(stress, userId, date);
+        }
+      }
       imported.cycles++;
     }
   } catch (e) {
@@ -204,6 +259,8 @@ async function syncWhoopDateRange(
         recovery_score: number;
         resting_heart_rate: number;
         hrv_rmssd_milli: number;
+        spo2_percentage?: number;
+        skin_temp_celsius?: number;
       };
     }>('/recovery', token, range);
 
@@ -212,10 +269,25 @@ async function syncWhoopDateRange(
       const date = cycleDateMap.get(rec.cycle_id) ?? rec.created_at?.split('T')[0];
       if (!date) continue;
 
+      const existing = db.prepare(`
+        SELECT strain FROM recovery_entries WHERE user_id = ? AND date = ? AND source = 'whoop'
+      `).get(userId, date) as { strain: number | null } | undefined;
+
+      const strain = existing?.strain ?? null;
+      const stress = estimateWhoopStressScore(
+        rec.score.recovery_score,
+        strain,
+        rec.score.hrv_rmssd_milli,
+        avgHrv,
+      );
+
       upsertWhoopRecovery(userId, date, {
         recovery_score: rec.score.recovery_score,
         hrv_ms: rec.score.hrv_rmssd_milli,
         resting_hr: rec.score.resting_heart_rate,
+        spo2_pct: rec.score.spo2_percentage ?? null,
+        skin_temp_c: rec.score.skin_temp_celsius ?? null,
+        stress_score: stress,
         raw_data: JSON.stringify(rec),
       });
       imported.recovery++;

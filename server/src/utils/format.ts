@@ -19,6 +19,7 @@ export function sanitizeRecoveryTrend(entries: Record<string, unknown>[]) {
     recovery_score: round(e.recovery_score as number, 0),
     hrv_ms: round(e.hrv_ms as number, 0),
     strain: round(e.strain as number, 1),
+    stress_score: round(e.stress_score as number, 0),
     duration_hours: round(e.duration_hours as number, 1),
     sleep_display: fmtSleepHours(e.duration_hours as number),
     performance_pct: round(e.performance_pct as number, 0),

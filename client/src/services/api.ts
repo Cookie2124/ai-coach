@@ -39,7 +39,7 @@ export const api = {
       request('/auth/profile', { method: 'PUT', body: JSON.stringify(data) }),
   },
   dashboard: () => request<Record<string, unknown>>('/analytics/dashboard'),
-  nutrition: () => request<Record<string, unknown>>('/analytics/nutrition'),
+  nutrition: (date?: string) => request<Record<string, unknown>>(`/analytics/nutrition${date ? `?date=${date}` : ''}`),
   recovery: () => request<Record<string, unknown>>('/analytics/recovery'),
   training: (days?: number) => request<Record<string, unknown>>(`/analytics/training${days ? `?days=${days}` : ''}`),
   strength: () => request<Record<string, unknown>>('/analytics/strength'),
@@ -66,7 +66,8 @@ export const api = {
       request('/data/sleep', { method: 'POST', body: JSON.stringify(data) }),
     logLifestyle: (data: Record<string, unknown>) =>
       request('/data/lifestyle', { method: 'POST', body: JSON.stringify(data) }),
-    getAcademic: () => request<{ items: unknown[]; sessions: unknown[] }>('/data/academic'),
+    getAcademic: () => request<{ items: unknown[]; sessions: unknown[]; studyPlan?: Record<string, unknown> }>('/data/academic'),
+    getStudyPlan: () => request<Record<string, unknown>>('/data/academic/plan'),
     addAcademic: (data: Record<string, unknown>) =>
       request('/data/academic', { method: 'POST', body: JSON.stringify(data) }),
     logStudy: (data: Record<string, unknown>) =>
@@ -120,6 +121,7 @@ export const api = {
       }),
     whoopStatus: () => request<Record<string, unknown>>('/integrations/whoop/status'),
     syncAll: () => request<Record<string, unknown>>('/integrations/sync-all', { method: 'POST' }),
+    appOpen: () => request<{ ok: boolean }>('/integrations/app-open', { method: 'POST' }),
     disconnect: (provider: string) => request(`/integrations/${provider}`, { method: 'DELETE' }),
     importAppleHealth: (data: unknown) =>
       request<Record<string, number>>('/integrations/apple_health/import', { method: 'POST', body: JSON.stringify(data) }),

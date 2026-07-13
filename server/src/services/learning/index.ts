@@ -1,5 +1,6 @@
 import { db } from '../../db/database.js';
 import { generateId, daysAgo, today } from '../../types/index.js';
+import { buildStudyPlan, refreshAcademicEstimates, logStudyRecommendationMemory } from '../academic/planner.js';
 import { getMealTotals, getTrainingLoad, getWeightTrend } from '../analytics/index.js';
 
 /** Upsert an auto-learned memory (won't overwrite user-edited entries) */
@@ -109,6 +110,50 @@ export function learnFromCalendar(userId: string) {
   }
 }
 
+/** Generate study-plan insights from due dates and logged study time */
+export function learnFromAcademicPlan(userId: string) {
+  refreshAcademicEstimates(userId);
+  const studyPlan = buildStudyPlan(userId);
+  logStudyRecommendationMemory(userId);
+
+  if (studyPlan.plan.length === 0) return;
+
+  const critical = studyPlan.plan.filter(p => p.urgency === 'critical' || p.urgency === 'high');
+  if (critical.length > 0) {
+    upsertAutoMemory(
+      userId,
+      'academic',
+      'study_priorities',
+      critical.slice(0, 4).map(p => `${p.title} due ${p.due_date} (${p.recommendedHoursToday}h today)`).join('; '),
+    );
+  }
+
+  if (studyPlan.hoursGapWeek > 2) {
+    const exists = db.prepare(`SELECT id FROM ai_insights WHERE user_id = ? AND title = ? AND dismissed = 0`)
+      .get(userId, 'Study hours behind schedule');
+    if (!exists) {
+      db.prepare(`INSERT INTO ai_insights (id, user_id, title, content, severity, category) VALUES (?, ?, ?, ?, ?, 'learning')`)
+        .run(
+          generateId(),
+          userId,
+          'Study hours behind schedule',
+          `You need ~${studyPlan.totalRecommendedWeek}h this week for upcoming work but logged ${studyPlan.studyHoursLoggedWeek}h. Focus ${studyPlan.totalRecommendedToday}h today on: ${studyPlan.plan.slice(0, 2).map(p => p.title).join(', ')}.`,
+          'warning',
+        );
+    }
+  }
+
+  const nextExam = studyPlan.nextExam;
+  if (nextExam && nextExam.daysUntil <= 7) {
+    upsertAutoMemory(
+      userId,
+      'academic',
+      'exam_countdown',
+      `${nextExam.title} in ${nextExam.daysUntil} day(s) — aim ${nextExam.recommendedHoursToday}h study today`,
+    );
+  }
+}
+
 /** Generate learning insights stored in ai_insights */
 export function generateLearningInsights(userId: string) {
   const insights: { title: string; content: string; severity: string }[] = [];
@@ -169,6 +214,7 @@ export function generateLearningInsights(userId: string) {
 export function runLearningCycle(userId: string) {
   inferFromBehavior(userId);
   learnFromCalendar(userId);
+  learnFromAcademicPlan(userId);
   const insights = generateLearningInsights(userId);
 
   const autoMemoryCount = (db.prepare(`SELECT COUNT(*) as c FROM memories WHERE user_id = ? AND source = 'auto'`).get(userId) as { c: number }).c;

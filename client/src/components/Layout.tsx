@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { NavLink, Outlet, useNavigate, useLocation } from 'react-router-dom';
 import {
   LayoutDashboard, MessageSquare, Utensils, Dumbbell, Heart, BookOpen, Calendar,
@@ -6,6 +6,7 @@ import {
 } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
 import { useTheme } from '../contexts/ThemeContext';
+import { api } from '../services/api';
 import clsx from 'clsx';
 
 const navItems = [
@@ -36,6 +37,17 @@ export default function Layout() {
   const navigate = useNavigate();
   const location = useLocation();
   const isChat = location.pathname === '/chat';
+
+  useEffect(() => {
+    api.integrations.appOpen().catch(() => {});
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') {
+        api.integrations.appOpen().catch(() => {});
+      }
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => document.removeEventListener('visibilitychange', onVisible);
+  }, []);
 
   const handleLogout = () => {
     logout();

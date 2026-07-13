@@ -11,7 +11,7 @@ import {
 import { syncProvider, SYNC_PROVIDERS } from '../services/integrations/index.js';
 import { configureWhoopToken, syncWhoopData } from '../services/integrations/whoop.js';
 import { syncGoogleAll } from '../services/integrations/google.js';
-import { mirrorGoogleCredentials } from '../services/integrations/auto-sync.js';
+import { mirrorGoogleCredentials, syncWhoopOnAppOpen } from '../services/integrations/auto-sync.js';
 import { runLearningCycle } from '../services/learning/index.js';
 
 const router = Router();
@@ -140,6 +140,11 @@ router.post('/:provider/configure', (req: AuthRequest, res) => {
   }
 
   res.json({ success: true });
+});
+
+router.post('/app-open', async (req: AuthRequest, res) => {
+  syncWhoopOnAppOpen(req.userId!).catch(err => console.warn('WHOOP open-sync:', err.message));
+  res.json({ ok: true });
 });
 
 router.get('/whoop/status', async (req: AuthRequest, res) => {
