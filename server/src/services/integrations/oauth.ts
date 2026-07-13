@@ -260,7 +260,7 @@ export async function refreshOAuthToken(
 
   if (provider === 'whoop') {
     bodyParams.scope = 'offline';
-    bodyParams.redirect_uri = redirectUri;
+    // WHOOP refresh docs: scope only — redirect_uri on refresh causes invalid_request
   }
 
   const response = await fetch(config.tokenUrl, {
@@ -270,7 +270,14 @@ export async function refreshOAuthToken(
   });
   if (!response.ok) {
     const err = await response.text();
-    throw new Error(`Token refresh failed (${provider}): ${err}`);
+    let message = err;
+    try {
+      const parsed = JSON.parse(err) as { error?: string; error_description?: string };
+      if (parsed.error_description) {
+        message = `${parsed.error}: ${parsed.error_description}`;
+      }
+    } catch { /* raw */ }
+    throw new Error(`Token refresh failed (${provider}): ${message}`);
   }
   const data = await response.json() as Record<string, unknown>;
   return normalizeTokens(data, existingRefresh ?? refreshToken);

@@ -28,7 +28,7 @@ type Summary = {
 
   hrv?: { latest: number; avg7d: number; trend?: number };
 
-  strain?: { latest: number; avg7d: number };
+  strain?: { latest: number; avg7d: number; latestDate?: string };
 
   weight?: { current: number; weeklyChange: number; monthlyChange: number; trend: string };
 
@@ -74,9 +74,29 @@ export default function DashboardPage() {
 
     load();
 
+    const onUpdate = () => load();
+
+    const onVisible = () => {
+
+      if (document.visibilityState === 'visible') load();
+
+    };
+
     window.addEventListener('focus', load);
 
-    return () => window.removeEventListener('focus', load);
+    window.addEventListener('aicoach-data-updated', onUpdate);
+
+    document.addEventListener('visibilitychange', onVisible);
+
+    return () => {
+
+      window.removeEventListener('focus', load);
+
+      window.removeEventListener('aicoach-data-updated', onUpdate);
+
+      document.removeEventListener('visibilitychange', onVisible);
+
+    };
 
   }, [load]);
 
@@ -102,6 +122,7 @@ export default function DashboardPage() {
 
   const availability = data.dataAvailability as Record<string, boolean> | undefined;
   const learning = data.learning as { autoMemories?: number; newInsights?: number } | undefined;
+  const whoopSync = data.whoopSync as { status?: string; lastSync?: string; lastError?: string } | undefined;
 
 
 
@@ -178,6 +199,20 @@ export default function DashboardPage() {
       </div>
 
 
+
+      {whoopSync?.lastError && (
+        <div className="card p-4 flex items-start gap-3 border-red-200 dark:border-red-800 bg-red-50 dark:bg-red-950/30">
+          <AlertTriangle className="w-5 h-5 text-red-500 shrink-0 mt-0.5" />
+          <div>
+            <p className="font-medium">WHOOP sync issue</p>
+            <p className="text-sm text-gray-600 dark:text-gray-300 mt-1">{whoopSync.lastError}</p>
+            <p className="text-xs text-gray-500 mt-2">
+              If this mentions tokens or redirect URI, disconnect and reconnect WHOOP on{' '}
+              <Link to="/integrations" className="text-brand-500 underline">Integrations</Link>.
+            </p>
+          </div>
+        </div>
+      )}
 
       {learning && (learning.autoMemories ?? 0) > 0 && (
         <div className="card p-4 flex items-start gap-3 border-brand-500/30 bg-brand-50/50 dark:bg-brand-900/10">
@@ -311,7 +346,13 @@ export default function DashboardPage() {
 
           icon={<Zap className="w-5 h-5" />}
 
-          subtitle={summary?.strain?.avg7d != null ? `7d avg ${fmtStrain(summary.strain.avg7d)}` : undefined}
+          subtitle={
+            summary?.strain?.avg7d != null
+              ? `7d avg ${fmtStrain(summary.strain.avg7d)}${summary.strain.latestDate ? ` · ${summary.strain.latestDate}` : ''}`
+              : summary?.strain?.latestDate
+                ? summary.strain.latestDate
+                : undefined
+          }
 
         />
 

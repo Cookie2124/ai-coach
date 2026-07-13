@@ -121,7 +121,7 @@ export const api = {
       }),
     whoopStatus: () => request<Record<string, unknown>>('/integrations/whoop/status'),
     syncAll: () => request<Record<string, unknown>>('/integrations/sync-all', { method: 'POST' }),
-    appOpen: () => request<{ ok: boolean }>('/integrations/app-open', { method: 'POST' }),
+    appOpen: () => request<{ skipped?: boolean; synced?: boolean; error?: string; result?: Record<string, unknown> }>('/integrations/app-open', { method: 'POST' }),
     disconnect: (provider: string) => request(`/integrations/${provider}`, { method: 'DELETE' }),
     importAppleHealth: (data: unknown) =>
       request<Record<string, number>>('/integrations/apple_health/import', { method: 'POST', body: JSON.stringify(data) }),

@@ -39,11 +39,16 @@ export default function Layout() {
   const isChat = location.pathname === '/chat';
 
   useEffect(() => {
-    api.integrations.appOpen().catch(() => {});
+    const runSync = () => {
+      api.integrations.appOpen().then(result => {
+        if (result.synced) {
+          window.dispatchEvent(new CustomEvent('aicoach-data-updated'));
+        }
+      }).catch(() => {});
+    };
+    runSync();
     const onVisible = () => {
-      if (document.visibilityState === 'visible') {
-        api.integrations.appOpen().catch(() => {});
-      }
+      if (document.visibilityState === 'visible') runSync();
     };
     document.addEventListener('visibilitychange', onVisible);
     return () => document.removeEventListener('visibilitychange', onVisible);

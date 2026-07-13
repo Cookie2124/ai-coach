@@ -143,8 +143,8 @@ router.post('/:provider/configure', (req: AuthRequest, res) => {
 });
 
 router.post('/app-open', async (req: AuthRequest, res) => {
-  syncWhoopOnAppOpen(req.userId!).catch(err => console.warn('WHOOP open-sync:', err.message));
-  res.json({ ok: true });
+  const result = await syncWhoopOnAppOpen(req.userId!);
+  res.json(result);
 });
 
 router.get('/whoop/status', async (req: AuthRequest, res) => {

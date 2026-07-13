@@ -20,6 +20,7 @@ interface IntegrationStatus {
   connected: boolean;
   last_sync: string;
   sync_status: string;
+  config?: { last_sync_error?: string };
 }
 
 export default function IntegrationsPage() {
@@ -171,6 +172,7 @@ export default function IntegrationsPage() {
           : `Synced ${provider} — ${summary}${range}`,
       });
       load();
+      window.dispatchEvent(new CustomEvent('aicoach-data-updated'));
     } catch (err) {
       setMessage({ type: 'error', text: `Sync failed: ${(err as Error).message}` });
     } finally {
@@ -317,6 +319,11 @@ export default function IntegrationsPage() {
                   {(whoopStats.stats as { recovery?: { earliest: string; latest: string } })?.recovery?.earliest && (
                     <> · {(whoopStats.stats as { recovery: { earliest: string; latest: string } }).recovery.earliest} → {(whoopStats.stats as { recovery: { earliest: string; latest: string } }).recovery.latest}</>
                   )}
+                </p>
+              )}
+              {getStatus('whoop')?.connected && getStatus('whoop')?.config?.last_sync_error && (
+                <p className="text-sm text-red-600 dark:text-red-400 mt-2">
+                  Last sync error: {getStatus('whoop')!.config!.last_sync_error}
                 </p>
               )}
               {(whoopRedirectUri || oauthCallbackUrl) && (

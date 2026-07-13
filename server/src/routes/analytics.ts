@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { db } from '../db/database.js';
 import { generateId, daysAgo, today, estimate1RM } from '../types/index.js';
 import { authMiddleware, type AuthRequest } from '../middleware/auth.js';
+import { getIntegration } from '../services/integrations/base.js';
 import { buildUnifiedContext, getNutritionAnalytics, getRecoveryAnalytics, getTrainingLoad, getStrengthAnalytics, getWeightTrend } from '../services/analytics/index.js';
 import { getDashboardSummary } from '../services/analytics/summary.js';
 import { sanitizeRecoveryEntry, sanitizeSleepEntry } from '../utils/format.js';
@@ -35,6 +36,8 @@ router.get('/dashboard', async (req: AuthRequest, res) => {
     hasScores: Object.keys(context.scores).length > 0,
   };
   const summary = getDashboardSummary(userId);
+  const whoopIntegration = getIntegration(userId, 'whoop');
+  const whoopConfig = whoopIntegration?.config ? JSON.parse(whoopIntegration.config) : {};
 
   const recovery = context.recovery.map(r => sanitizeRecoveryEntry(r as unknown as Record<string, unknown>));
   const sleep = context.sleep.map(s => sanitizeSleepEntry(s as unknown as Record<string, unknown>));
@@ -49,6 +52,12 @@ router.get('/dashboard', async (req: AuthRequest, res) => {
     dataAvailability,
     summary,
     learning,
+    whoopSync: {
+      status: whoopIntegration?.sync_status ?? null,
+      lastSync: whoopIntegration?.last_sync ?? null,
+      lastError: whoopConfig.last_sync_error ?? null,
+      lastImported: whoopConfig.last_sync_imported ?? null,
+    },
   });
 });
 

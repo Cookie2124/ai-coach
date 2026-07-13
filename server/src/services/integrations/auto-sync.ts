@@ -4,13 +4,13 @@ import { getIntegrationStatus, saveIntegration, type IntegrationCredentials } fr
 import { runLearningCycle } from '../learning/index.js';
 
 const SYNC_INTERVAL_MS = 30 * 60 * 1000;
-/** Min gap between WHOOP syncs triggered by opening the app (avoids hammering on navigation) */
-const WHOOP_OPEN_SYNC_MS = 3 * 60 * 1000;
+/** Min gap between WHOOP syncs triggered by opening the app */
+const WHOOP_OPEN_SYNC_MS = 60 * 1000;
 
 const lastSyncByUser = new Map<string, number>();
 const lastWhoopOpenSyncByUser = new Map<string, number>();
 
-/** Sync WHOOP every time the user opens the app (debounced ~3 min). */
+/** Sync WHOOP when the user opens the app (debounced ~1 min). */
 export async function syncWhoopOnAppOpen(userId: string) {
   const statuses = getIntegrationStatus(userId);
   const whoopConnected = statuses.some(s => s.provider === 'whoop' && s.connected);
@@ -25,9 +25,12 @@ export async function syncWhoopOnAppOpen(userId: string) {
     const result = await syncProvider(userId, 'whoop', { days: 14 });
     lastWhoopOpenSyncByUser.set(userId, Date.now());
     runLearningCycle(userId);
+    console.log(`[whoop] open-sync ok user=${userId}`, result);
     return { synced: true, result };
   } catch (e) {
-    return { synced: false, error: (e as Error).message };
+    const message = (e as Error).message;
+    console.error(`[whoop] open-sync failed user=${userId}:`, message);
+    return { synced: false, error: message };
   }
 }
 

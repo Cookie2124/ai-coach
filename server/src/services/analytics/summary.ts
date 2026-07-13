@@ -3,6 +3,7 @@ import { daysAgo, today } from '../../types/index.js';
 import { getMealTotals, getWeightTrend, getTrainingLoad } from './index.js';
 import { getEffectiveTargets } from './profile.js';
 import { computeTrendDelta, fmtSleepHours, round, sanitizeRecoveryEntry, sanitizeSleepEntry } from '../../utils/format.js';
+import { getIntegration } from '../integrations/base.js';
 
 function avg(values: number[]): number {
   if (values.length === 0) return 0;
@@ -11,14 +12,23 @@ function avg(values: number[]): number {
 
 export function getDashboardSummary(userId: string) {
   const t = today();
+  const whoopIntegration = getIntegration(userId, 'whoop');
+  const whoopConnected = whoopIntegration?.enabled === 1;
+  const sourceClause = whoopConnected ? " AND source = 'whoop'" : '';
 
   const recoveryRows = db.prepare(`
-    SELECT * FROM recovery_entries WHERE user_id = ? AND date >= ? ORDER BY date ASC
+    SELECT * FROM recovery_entries WHERE user_id = ? AND date >= ?${sourceClause} ORDER BY date ASC
   `).all(userId, daysAgo(90)) as Record<string, unknown>[];
 
   const sleepRows = db.prepare(`
-    SELECT * FROM sleep_entries WHERE user_id = ? AND date >= ? ORDER BY date ASC
+    SELECT * FROM sleep_entries WHERE user_id = ? AND date >= ?${whoopConnected ? " AND source = 'whoop'" : ''} ORDER BY date ASC
   `).all(userId, daysAgo(90)) as Record<string, unknown>[];
+
+  const latestStrainRow = db.prepare(`
+    SELECT strain, date FROM recovery_entries
+    WHERE user_id = ? AND source = 'whoop' AND strain IS NOT NULL AND strain > 0
+    ORDER BY date DESC LIMIT 1
+  `).get(userId) as { strain: number; date: string } | undefined;
 
   const latestRecovery = sanitizeRecoveryEntry(recoveryRows[recoveryRows.length - 1] as Record<string, unknown> | undefined);
   const latestSleep = sanitizeSleepEntry(sleepRows[sleepRows.length - 1] as Record<string, unknown> | undefined);
@@ -73,7 +83,8 @@ export function getDashboardSummary(userId: string) {
     },
 
     strain: {
-      latest: latestRecovery?.strain ?? null,
+      latest: latestStrainRow?.strain ?? latestRecovery?.strain ?? null,
+      latestDate: latestStrainRow?.date ?? null,
       avg7d: strainValues.length > 0 ? round(avg(strainValues.slice(-7)), 1) : null,
     },
 

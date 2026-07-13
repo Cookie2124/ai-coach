@@ -30,19 +30,41 @@ interface ImportCounts {
   cycles: number;
 }
 
-async function getWhoopToken(userId: string): Promise<string> {
-  const integration = getIntegration(userId, 'whoop');
-  const config = integration?.config ? JSON.parse(integration.config) : {};
-  const redirectUri = (config.oauth_redirect_uri as string) || undefined;
-  return refreshTokenIfNeeded(userId, 'whoop', (rt) =>
-    refreshOAuthToken('whoop', rt, rt, redirectUri),
-  );
+async function getWhoopToken(userId: string, forceRefresh = false): Promise<string> {
+  if (forceRefresh) {
+    const creds = getCredentials(userId, 'whoop');
+    if (!creds.refresh_token) {
+      throw new Error('WHOOP access token expired — disconnect and reconnect on Integrations.');
+    }
+    const newCreds = await refreshOAuthToken('whoop', creds.refresh_token as string, creds.refresh_token as string);
+    const merged = { ...creds, ...newCreds, refresh_token: newCreds.refresh_token ?? creds.refresh_token };
+    const existing = getIntegration(userId, 'whoop');
+    const prevConfig = existing?.config ? JSON.parse(existing.config) : {};
+    saveIntegration(userId, 'whoop', merged, prevConfig, true);
+    return merged.access_token as string;
+  }
+  return refreshTokenIfNeeded(userId, 'whoop', (rt) => refreshOAuthToken('whoop', rt, rt));
 }
 
-async function whoopFetch<T = unknown>(endpoint: string, token: string): Promise<T> {
+function saveWhoopSyncMeta(userId: string, meta: Record<string, unknown>) {
+  const existing = getIntegration(userId, 'whoop');
+  const creds = getCredentials(userId, 'whoop');
+  const prevConfig = existing?.config ? JSON.parse(existing.config) : {};
+  const nextConfig = { ...prevConfig, ...meta };
+  if (meta.last_sync_error === null) {
+    delete nextConfig.last_sync_error;
+  }
+  saveIntegration(userId, 'whoop', creds, nextConfig, true);
+}
+
+async function whoopFetch<T = unknown>(endpoint: string, token: string, userId?: string): Promise<T> {
   const response = await fetch(`${WHOOP_API}${endpoint}`, {
     headers: { Authorization: `Bearer ${token}` },
   });
+  if (response.status === 401 && userId) {
+    const freshToken = await getWhoopToken(userId, true);
+    return whoopFetch<T>(endpoint, freshToken);
+  }
   if (!response.ok) {
     const body = await response.text();
     throw new Error(`WHOOP API ${response.status}: ${body}`);
@@ -50,15 +72,27 @@ async function whoopFetch<T = unknown>(endpoint: string, token: string): Promise
   return response.json() as Promise<T>;
 }
 
-async function whoopFetchAll<T>(path: string, token: string, params: Record<string, string>): Promise<T[]> {
+async function whoopFetchAll<T>(path: string, token: string, params: Record<string, string>, userId: string): Promise<T[]> {
   const records: T[] = [];
   let nextToken: string | undefined;
+  let activeToken = token;
 
   do {
     const qs = new URLSearchParams({ ...params, limit: '25', ...(nextToken ? { nextToken } : {}) });
-    const page = await whoopFetch<WhoopPage<T>>(`${path}?${qs}`, token);
-    records.push(...(page.records ?? []));
-    nextToken = page.next_token;
+    try {
+      const page = await whoopFetch<WhoopPage<T>>(`${path}?${qs}`, activeToken, userId);
+      records.push(...(page.records ?? []));
+      nextToken = page.next_token;
+    } catch (e) {
+      if ((e as Error).message.includes('401') && userId) {
+        activeToken = await getWhoopToken(userId, true);
+        const page = await whoopFetch<WhoopPage<T>>(`${path}?${qs}`, activeToken, userId);
+        records.push(...(page.records ?? []));
+        nextToken = page.next_token;
+      } else {
+        throw e;
+      }
+    }
   } while (nextToken);
 
   return records;
@@ -222,7 +256,7 @@ async function syncWhoopDateRange(
 
   try {
     const cycles = await whoopFetchAll<{ id: number; start: string; score?: { strain: number; kilojoule: number } }>(
-      '/cycle', token, range,
+      '/cycle', token, range, userId,
     );
     for (const c of cycles) {
       const date = c.start?.split('T')[0];
@@ -262,7 +296,7 @@ async function syncWhoopDateRange(
         spo2_percentage?: number;
         skin_temp_celsius?: number;
       };
-    }>('/recovery', token, range);
+    }>('/recovery', token, range, userId);
 
     for (const rec of recoveries) {
       if (rec.score_state !== 'SCORED' || !rec.score) continue;
@@ -314,7 +348,7 @@ async function syncWhoopDateRange(
         sleep_efficiency_percentage: number;
         respiratory_rate?: number;
       };
-    }>('/activity/sleep', token, range);
+    }>('/activity/sleep', token, range, userId);
 
     for (const sl of sleeps) {
       if (sl.score_state !== 'SCORED' || !sl.score) continue;
@@ -366,7 +400,7 @@ async function syncWhoopDateRange(
         kilojoule: number;
         distance_meter?: number;
       };
-    }>('/activity/workout', token, range);
+    }>('/activity/workout', token, range, userId);
 
     for (const wo of workouts) {
       if (wo.score_state !== 'SCORED') continue;
@@ -440,9 +474,9 @@ export async function syncWhoopData(userId: string, options?: WhoopSyncOptions) 
 
     // Profile + body measurements
     try {
-      const profile = await whoopFetch<Record<string, unknown>>('/user/profile/basic', token);
+      const profile = await whoopFetch<Record<string, unknown>>('/user/profile/basic', token, userId);
       const body = await whoopFetch<{ height_meter: number; weight_kilogram: number; max_heart_rate: number }>(
-        '/user/measurement/body', token,
+        '/user/measurement/body', token, userId,
       );
       if (body.weight_kilogram) {
         applyDefaultProfileTargets(userId, body.weight_kilogram);
@@ -450,7 +484,7 @@ export async function syncWhoopData(userId: string, options?: WhoopSyncOptions) 
 
       const existing = getIntegration(userId, 'whoop');
       const prevConfig = existing?.config ? JSON.parse(existing.config) : {};
-      saveIntegration(userId, 'whoop', creds, {
+      saveIntegration(userId, 'whoop', getCredentials(userId, 'whoop'), {
         ...prevConfig,
         profile,
         body,
@@ -478,8 +512,17 @@ export async function syncWhoopData(userId: string, options?: WhoopSyncOptions) 
       throw new Error(`WHOOP sync failed: ${errors.join('; ')}`);
     }
 
+    saveWhoopSyncMeta(userId, {
+      last_sync_at: new Date().toISOString(),
+      last_sync_errors: errors.length > 0 ? errors : null,
+      last_sync_imported: imported,
+      last_sync_error: null,
+    });
+
     setSyncStatus(userId, 'whoop', errors.length > 0 ? 'partial' : 'success');
   } catch (error) {
+    const message = (error as Error).message;
+    saveWhoopSyncMeta(userId, { last_sync_error: message, last_sync_at: new Date().toISOString() });
     setSyncStatus(userId, 'whoop', 'error');
     throw error;
   }
@@ -498,7 +541,7 @@ export function configureWhoopToken(userId: string, accessToken: string, refresh
 
 export async function testWhoopConnection(userId: string) {
   const token = await getWhoopToken(userId);
-  const profile = await whoopFetch('/user/profile/basic', token);
+  const profile = await whoopFetch('/user/profile/basic', token, userId);
   return { connected: true, profile };
 }
 
