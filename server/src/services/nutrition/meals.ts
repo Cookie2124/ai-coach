@@ -1,5 +1,6 @@
 import { db } from '../../db/database.js';
 import { generateId } from '../../types/index.js';
+import { todayInTz, addDaysToLocalDate, normalizeTimezone } from '../../utils/timezone.js';
 import {
   estimateMealNutrition,
   parseMealDate,
@@ -13,12 +14,12 @@ export { estimateMealNutrition, parseMealDate, detectMealType, isMealLogIntent, 
 export function logMeal(
   userId: string,
   description: string,
-  options?: { logged_at?: string; meal_type?: string; calories?: number; protein_g?: number; carbs_g?: number; fat_g?: number; fibre_g?: number },
+  options?: { logged_at?: string; meal_type?: string; calories?: number; protein_g?: number; carbs_g?: number; fat_g?: number; fibre_g?: number; timeZone?: string },
 ) {
   const cleanDesc = extractMealDescription(description);
   const estimated = estimateMealNutrition(cleanDesc);
   const id = generateId();
-  const loggedAt = options?.logged_at ?? parseMealDate(description);
+  const loggedAt = options?.logged_at ?? parseMealDate(description, options?.timeZone);
 
   db.prepare(`
     INSERT INTO meals (id, user_id, description, calories, protein_g, carbs_g, fat_g, fibre_g, meal_type, logged_at, ai_estimated)
@@ -49,13 +50,13 @@ export function logMeal(
   };
 }
 
-export function logWeightFromChat(userId: string, message: string): { logged: boolean; weight_kg?: number } {
+export function logWeightFromChat(userId: string, message: string, timeZone?: string): { logged: boolean; weight_kg?: number } {
   const match = message.match(/(\d+(?:\.\d+)?)\s*kg/i);
   if (!match) return { logged: false };
   const weight_kg = parseFloat(match[1]);
   const id = generateId();
   db.prepare(`INSERT INTO weight_entries (id, user_id, weight_kg, notes, recorded_at) VALUES (?, ?, ?, 'Logged via AI Coach', ?)`)
-    .run(id, userId, weight_kg, parseMealDate(message));
+    .run(id, userId, weight_kg, parseMealDate(message, timeZone));
   return { logged: true, weight_kg };
 }
 
@@ -76,7 +77,8 @@ export function deleteMealById(userId: string, mealId: string): boolean {
 }
 
 /** Delete meals matching a chat command — returns deleted meal descriptions */
-export function deleteMealsFromChat(userId: string, message: string): { deleted: { id: string; description: string; logged_at: string }[] } {
+export function deleteMealsFromChat(userId: string, message: string, timeZone?: string): { deleted: { id: string; description: string; logged_at: string }[] } {
+  const tz = normalizeTimezone(timeZone);
   const lower = message.toLowerCase();
   const deleted: { id: string; description: string; logged_at: string }[] = [];
 
@@ -86,7 +88,7 @@ export function deleteMealsFromChat(userId: string, message: string): { deleted:
     return { deleted };
   }
 
-  const today = new Date().toISOString().split('T')[0];
+  const today = todayInTz(tz);
   let mealType: string | null = null;
   if (lower.includes('breakfast')) mealType = 'breakfast';
   else if (lower.includes('lunch')) mealType = 'lunch';
@@ -94,7 +96,7 @@ export function deleteMealsFromChat(userId: string, message: string): { deleted:
   else if (lower.includes('snack')) mealType = 'snack';
 
   const dateFilter = lower.includes('yesterday')
-    ? new Date(Date.now() - 86400000).toISOString().split('T')[0]
+    ? addDaysToLocalDate(today, -1)
     : lower.includes('today') || mealType ? today : null;
 
   // Match food keyword in message

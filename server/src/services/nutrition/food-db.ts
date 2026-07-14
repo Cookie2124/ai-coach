@@ -1,4 +1,8 @@
 /** Nutritional values per unit (g, ml, or serving item) */
+import {
+  normalizeTimezone, todayInTz, addDaysToLocalDate, localLoggedAt, getLocalTimeParts, mealTimeForType,
+} from '../../utils/timezone.js';
+
 export type FoodEntry = {
   calories: number;
   protein: number;
@@ -232,42 +236,45 @@ export function estimateMealNutrition(description: string) {
   };
 }
 
-export function parseMealDate(message: string): string {
+export function parseMealDate(message: string, timeZone?: string): string {
+  const tz = normalizeTimezone(timeZone);
   const lower = message.toLowerCase();
-  const d = new Date();
+  let localDate = todayInTz(tz);
 
   if (lower.includes('yesterday')) {
-    d.setDate(d.getDate() - 1);
+    localDate = addDaysToLocalDate(localDate, -1);
   } else if (lower.includes('day before yesterday') || lower.includes('2 days ago')) {
-    d.setDate(d.getDate() - 2);
+    localDate = addDaysToLocalDate(localDate, -2);
   } else if (lower.match(/\b(\d+)\s*days?\s*ago\b/)) {
     const m = lower.match(/\b(\d+)\s*days?\s*ago\b/);
-    if (m) d.setDate(d.getDate() - parseInt(m[1]));
-  } else if (lower.includes('last night')) {
-    d.setDate(d.getDate() - (d.getHours() < 12 ? 1 : 0));
-    d.setHours(20, 0, 0, 0);
+    if (m) localDate = addDaysToLocalDate(localDate, -parseInt(m[1]));
   }
 
   const isoMatch = message.match(/\b(20\d{2}-\d{2}-\d{2})\b/);
   if (isoMatch) {
-    const parsed = new Date(isoMatch[1] + 'T12:00:00');
-    if (!Number.isNaN(parsed.getTime())) return parsed.toISOString();
+    localDate = isoMatch[1];
+  } else {
+    const auDate = message.match(/\b(\d{1,2})[\/\-](\d{1,2})(?:[\/\-](\d{2,4}))?\b/);
+    if (auDate) {
+      const day = parseInt(auDate[1]);
+      const month = parseInt(auDate[2]);
+      const year = auDate[3] ? parseInt(auDate[3].length === 2 ? '20' + auDate[3] : auDate[3]) : parseInt(localDate.slice(0, 4));
+      localDate = `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+    }
   }
 
-  const auDate = message.match(/\b(\d{1,2})[\/\-](\d{1,2})(?:[\/\-](\d{2,4}))?\b/);
-  if (auDate) {
-    const day = parseInt(auDate[1]);
-    const month = parseInt(auDate[2]) - 1;
-    const year = auDate[3] ? parseInt(auDate[3].length === 2 ? '20' + auDate[3] : auDate[3]) : d.getFullYear();
-    const parsed = new Date(year, month, day, 12, 0, 0);
-    if (!Number.isNaN(parsed.getTime())) return parsed.toISOString();
+  const mealType = detectMealType(message);
+  if (localDate === todayInTz(tz)) {
+    const parts = getLocalTimeParts(new Date(), tz);
+    if (lower.includes('this morning') || lower.includes('for breakfast')) {
+      return localLoggedAt(localDate, 8, 0);
+    }
+    if (lower.includes('for lunch')) return localLoggedAt(localDate, 12, 30);
+    if (lower.includes('for dinner') || lower.includes('tonight')) return localLoggedAt(localDate, 19, 0);
+    return localLoggedAt(localDate, parts.hour, parts.minute);
   }
 
-  if (lower.includes('this morning') || lower.includes('for breakfast')) d.setHours(8, 0, 0, 0);
-  else if (lower.includes('for lunch')) d.setHours(12, 30, 0, 0);
-  else if (lower.includes('for dinner') || lower.includes('tonight')) d.setHours(19, 0, 0, 0);
-
-  return d.toISOString();
+  return mealTimeForType(mealType, localDate, tz);
 }
 
 export function detectMealType(message: string): string {

@@ -4,6 +4,7 @@ import { generateId, estimate1RM } from '../types/index.js';
 import { authMiddleware, type AuthRequest } from '../middleware/auth.js';
 import { buildStudyPlan } from '../services/academic/planner.js';
 import { estimateMealNutrition, logMeal } from '../services/nutrition/meals.js';
+import { parseAndLogMealWithAI } from '../services/nutrition/ai-parse.js';
 
 const router = Router();
 router.use(authMiddleware);
@@ -20,8 +21,24 @@ router.get('/meals', (req: AuthRequest, res) => {
 
 router.post('/meals', (req: AuthRequest, res) => {
   const { description, meal_type, logged_at, calories, protein_g, carbs_g, fat_g, fibre_g } = req.body;
-  const result = logMeal(req.userId!, description, { meal_type, logged_at, calories, protein_g, carbs_g, fat_g, fibre_g });
+  const tz = req.timezone!;
+  const result = logMeal(req.userId!, description, {
+    meal_type, logged_at, calories, protein_g, carbs_g, fat_g, fibre_g, timeZone: tz,
+  });
   res.json(result);
+});
+
+router.post('/meals/ai-log', async (req: AuthRequest, res) => {
+  try {
+    const { description, date } = req.body;
+    const result = await parseAndLogMealWithAI(req.userId!, description, {
+      localDate: date,
+      timeZone: req.timezone!,
+    });
+    res.json(result);
+  } catch (error) {
+    res.status(400).json({ error: (error as Error).message });
+  }
 });
 
 router.delete('/meals/:id', (req: AuthRequest, res) => {

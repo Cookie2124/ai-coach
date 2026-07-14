@@ -4,10 +4,19 @@ function getToken(): string | null {
   return localStorage.getItem('aicoach_token');
 }
 
+function getTimezone(): string {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || 'Australia/Sydney';
+  } catch {
+    return 'Australia/Sydney';
+  }
+}
+
 async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   const token = getToken();
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
+    'X-Timezone': getTimezone(),
     ...(options.headers as Record<string, string>),
   };
   if (token) headers['Authorization'] = `Bearer ${token}`;
@@ -51,6 +60,8 @@ export const api = {
     getMeals: (date?: string) => request<unknown[]>(`/data/meals${date ? `?date=${date}` : ''}`),
     logMeal: (data: { description: string; meal_type?: string; logged_at?: string }) =>
       request('/data/meals', { method: 'POST', body: JSON.stringify(data) }),
+    aiLogMeal: (data: { description: string; date?: string }) =>
+      request<Record<string, unknown>>('/data/meals/ai-log', { method: 'POST', body: JSON.stringify(data) }),
     deleteMeal: (id: string) => request<{ success: boolean }>(`/data/meals/${id}`, { method: 'DELETE' }),
     logWeight: (data: { weight_kg: number; notes?: string }) =>
       request('/data/weight', { method: 'POST', body: JSON.stringify(data) }),

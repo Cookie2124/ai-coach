@@ -1,8 +1,9 @@
 import { useEffect, useState, useCallback, useRef } from 'react';
-import { Plus, Trash2, ChevronLeft, ChevronRight, Calendar } from 'lucide-react';
+import { Plus, Trash2, ChevronLeft, ChevronRight, Calendar, Sparkles } from 'lucide-react';
 import { api } from '../services/api';
 import { StatCard, ProgressBar, LoadingSpinner } from '../components/ui';
 import { fmtGrams, fmtCalories } from '../utils/format';
+import { toLocalDateInput, addDaysToLocalDate, formatNotchDate, formatLocalNow } from '../utils/date';
 
 type Meal = {
   id: string;
@@ -15,26 +16,14 @@ type Meal = {
   logged_at: string;
 };
 
-function toDateInput(d: Date): string {
-  return d.toISOString().split('T')[0];
-}
-
-function formatNotchDate(iso: string): string {
-  const d = new Date(`${iso}T12:00:00`);
-  const today = toDateInput(new Date());
-  const yesterday = toDateInput(new Date(Date.now() - 86400000));
-  const label = d.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' });
-  if (iso === today) return `Today · ${label}`;
-  if (iso === yesterday) return `Yesterday · ${label}`;
-  return label;
-}
-
 export default function NutritionPage() {
-  const [selectedDate, setSelectedDate] = useState(toDateInput(new Date()));
+  const [selectedDate, setSelectedDate] = useState(toLocalDateInput());
   const [analytics, setAnalytics] = useState<Record<string, unknown> | null>(null);
   const [meals, setMeals] = useState<Meal[]>([]);
   const [mealIndex, setMealIndex] = useState(0);
   const [description, setDescription] = useState('');
+  const [logging, setLogging] = useState(false);
+  const [logMessage, setLogMessage] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const dateInputRef = useRef<HTMLInputElement>(null);
 
@@ -55,18 +44,29 @@ export default function NutritionPage() {
   useEffect(() => { load(); }, [load]);
 
   const shiftDate = (delta: number) => {
-    const d = new Date(`${selectedDate}T12:00:00`);
-    d.setDate(d.getDate() + delta);
-    setSelectedDate(toDateInput(d));
+    setSelectedDate(addDaysToLocalDate(selectedDate, delta));
     setMealIndex(0);
   };
 
   const logMeal = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!description.trim()) return;
-    await api.data.logMeal({ description, logged_at: `${selectedDate}T12:00:00` });
-    setDescription('');
-    load();
+    if (!description.trim() || logging) return;
+    setLogging(true);
+    setLogMessage(null);
+    try {
+      const result = await api.data.aiLogMeal({ description: description.trim(), date: selectedDate });
+      setDescription('');
+      setLogMessage(
+        `Logged: ${result.description} — ${Math.round(result.calories as number)} cal, ${Math.round(result.protein_g as number)}g protein` +
+        (result.source === 'ai' ? ' (AI estimate)' : ''),
+      );
+      load();
+      window.dispatchEvent(new CustomEvent('aicoach-data-updated'));
+    } catch (err) {
+      setLogMessage((err as Error).message);
+    } finally {
+      setLogging(false);
+    }
   };
 
   const removeMeal = async (meal: Meal) => {
@@ -85,6 +85,7 @@ export default function NutritionPage() {
   const remaining = analytics?.remaining as Record<string, number | null>;
   const macroSplit = analytics?.macroSplit as Record<string, number> | null;
   const adherence = analytics?.adherence as Record<string, number>;
+  const localToday = (analytics?.localToday as string) ?? toLocalDateInput();
 
   const currentMeal = meals[mealIndex];
   const fmtTarget = (val: number | null | undefined, unit = '') =>
@@ -95,6 +96,7 @@ export default function NutritionPage() {
       {/* Date notch */}
       <div className="sticky top-0 z-20 -mx-3 sm:-mx-4 md:-mx-6 px-3 sm:px-4 md:px-6 pt-1 pb-3 bg-gray-50/95 dark:bg-gray-950/95 backdrop-blur border-b border-gray-200/80 dark:border-gray-800/80">
         <div className="max-w-lg mx-auto">
+          <p className="text-center text-[10px] text-gray-400 mb-1">{formatLocalNow()}</p>
           <div className="rounded-2xl bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 shadow-sm px-2 py-2 flex items-center gap-1">
             <button type="button" onClick={() => shiftDate(-1)} className="p-2 rounded-xl hover:bg-gray-100 dark:hover:bg-gray-800 touch-target" aria-label="Previous day">
               <ChevronLeft className="w-5 h-5" />
@@ -115,6 +117,13 @@ export default function NutritionPage() {
             </button>
             <button
               type="button"
+              onClick={() => setSelectedDate(localToday)}
+              className="px-2 py-1 text-xs rounded-lg text-brand-600 hover:bg-brand-50 dark:hover:bg-brand-900/20"
+            >
+              Today
+            </button>
+            <button
+              type="button"
               onClick={() => dateInputRef.current?.showPicker?.()}
               className="p-2 rounded-xl text-brand-600 hover:bg-brand-50 dark:hover:bg-brand-900/20 touch-target"
               aria-label="Pick date"
@@ -125,18 +134,34 @@ export default function NutritionPage() {
         </div>
       </div>
 
-      <form onSubmit={logMeal} className="card p-4 mobile-stack">
-        <input className="input flex-1" value={description} onChange={e => setDescription(e.target.value)}
-          placeholder={`Log meal for ${formatNotchDate(selectedDate).split(' · ')[0]}…`} />
-        <button type="submit" className="btn-primary flex items-center justify-center gap-2 sm:shrink-0">
-          <Plus className="w-4 h-4" /> Log Meal
-        </button>
+      <form onSubmit={logMeal} className="card p-4 space-y-3">
+        <label className="text-sm font-medium flex items-center gap-2">
+          <Sparkles className="w-4 h-4 text-brand-500" />
+          AI meal log — say what you ate in plain English
+        </label>
+        <textarea
+          className="input w-full min-h-[88px] resize-y"
+          value={description}
+          onChange={e => setDescription(e.target.value)}
+          placeholder={`e.g. "2 eggs on toast with avocado" or "protein shake after gym" for ${formatNotchDate(selectedDate).split(' · ')[0]}`}
+        />
+        <div className="flex flex-col sm:flex-row gap-2 sm:items-center sm:justify-between">
+          <p className="text-xs text-gray-500">AI estimates calories & macros, then saves to this day.</p>
+          <button type="submit" disabled={logging || !description.trim()} className="btn-primary flex items-center justify-center gap-2 sm:shrink-0 disabled:opacity-50">
+            <Plus className="w-4 h-4" /> {logging ? 'Logging…' : 'Log with AI'}
+          </button>
+        </div>
+        {logMessage && (
+          <p className={`text-sm ${logMessage.startsWith('Logged') ? 'text-green-600 dark:text-green-400' : 'text-red-600'}`}>
+            {logMessage}
+          </p>
+        )}
       </form>
 
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
         <StatCard title="Calories" value={Math.round(day?.calories ?? 0)} subtitle={configured ? `/ ${fmtTarget(targets?.calories)}` : undefined} />
         <StatCard title="Protein" value={`${Math.round(day?.protein_g ?? 0)}g`} subtitle={configured ? `/ ${fmtTarget(targets?.protein, 'g')}` : undefined} />
-        <StatCard title="Meals" value={day?.mealCount ?? meals.length} subtitle="logged today" />
+        <StatCard title="Meals" value={day?.mealCount ?? meals.length} subtitle="logged this day" />
         <StatCard title="Remaining" value={remaining?.calories != null ? `${remaining.calories} cal` : '—'} subtitle={remaining?.protein != null ? `${remaining.protein}g protein left` : undefined} />
       </div>
 
@@ -174,14 +199,14 @@ export default function NutritionPage() {
 
         {meals.length === 0 ? (
           <p className="text-gray-500 text-sm flex-1 flex items-center justify-center text-center py-8">
-            No meals on this day. Log above or ask AI Coach.
+            No meals on this day. Describe what you ate above — AI will log it.
           </p>
         ) : currentMeal ? (
           <>
             <div className="flex-1 flex flex-col justify-center py-2">
               <p className="text-lg font-semibold">{currentMeal.description}</p>
               <p className="text-sm text-gray-500 mt-1">
-                {new Date(currentMeal.logged_at).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })}
+                {new Date(currentMeal.logged_at.includes('T') ? currentMeal.logged_at : currentMeal.logged_at + 'T12:00:00').toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })}
                 {currentMeal.meal_type !== 'other' && ` · ${currentMeal.meal_type}`}
               </p>
               <div className="grid grid-cols-4 gap-2 mt-4 text-center">

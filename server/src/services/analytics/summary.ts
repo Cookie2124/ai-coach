@@ -1,5 +1,5 @@
 import { db } from '../../db/database.js';
-import { daysAgo, today } from '../../types/index.js';
+import { daysAgoInTz, todayInTz, normalizeTimezone } from '../../utils/timezone.js';
 import { getMealTotals, getWeightTrend, getTrainingLoad } from './index.js';
 import { getEffectiveTargets } from './profile.js';
 import { computeTrendDelta, fmtSleepHours, round, sanitizeRecoveryEntry, sanitizeSleepEntry } from '../../utils/format.js';
@@ -10,19 +10,20 @@ function avg(values: number[]): number {
   return values.reduce((a, b) => a + b, 0) / values.length;
 }
 
-export function getDashboardSummary(userId: string) {
-  const t = today();
+export function getDashboardSummary(userId: string, timeZone?: string) {
+  const tz = normalizeTimezone(timeZone);
+  const t = todayInTz(tz);
   const whoopIntegration = getIntegration(userId, 'whoop');
   const whoopConnected = whoopIntegration?.enabled === 1;
   const sourceClause = whoopConnected ? " AND source = 'whoop'" : '';
 
   const recoveryRows = db.prepare(`
     SELECT * FROM recovery_entries WHERE user_id = ? AND date >= ?${sourceClause} ORDER BY date ASC
-  `).all(userId, daysAgo(90)) as Record<string, unknown>[];
+  `).all(userId, daysAgoInTz(90, tz)) as Record<string, unknown>[];
 
   const sleepRows = db.prepare(`
     SELECT * FROM sleep_entries WHERE user_id = ? AND date >= ?${whoopConnected ? " AND source = 'whoop'" : ''} ORDER BY date ASC
-  `).all(userId, daysAgo(90)) as Record<string, unknown>[];
+  `).all(userId, daysAgoInTz(90, tz)) as Record<string, unknown>[];
 
   const latestStrainRow = db.prepare(`
     SELECT strain, date FROM recovery_entries
@@ -44,14 +45,14 @@ export function getDashboardSummary(userId: string) {
   `).all(userId) as { weight_kg: number; recorded_at: string }[];
 
   const nutritionToday = getMealTotals(userId, t, t);
-  const nutritionWeek = getMealTotals(userId, daysAgo(7), t);
+  const nutritionWeek = getMealTotals(userId, daysAgoInTz(7, tz), t);
   const targets = getEffectiveTargets(userId);
   const training = getTrainingLoad(userId, 28);
 
   const workouts = db.prepare(`
     SELECT date, activity_type, duration_minutes, strain, notes, source FROM workouts
     WHERE user_id = ? AND date >= ? ORDER BY date DESC LIMIT 10
-  `).all(userId, daysAgo(14)) as Record<string, unknown>[];
+  `).all(userId, daysAgoInTz(14, tz)) as Record<string, unknown>[];
 
   return {
     recovery: latestRecovery ? {
@@ -133,7 +134,7 @@ export function getDashboardSummary(userId: string) {
         kg: round(w.weight_kg, 1),
       })),
       nutrition: Array.from({ length: 7 }, (_, i) => {
-        const d = daysAgo(6 - i);
+        const d = daysAgoInTz(6 - i, tz);
         const totals = getMealTotals(userId, d, d);
         return { date: d, calories: Math.round(totals.calories), protein: Math.round(totals.protein_g) };
       }),

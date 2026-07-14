@@ -3,6 +3,9 @@ import { generateId } from '../../types/index.js';
 import { buildUnifiedContext } from '../analytics/index.js';
 import { getEffectiveTargets } from '../analytics/profile.js';
 import { generateRecommendations } from '../predictions/index.js';
+import { buildNutritionContextForAI } from '../nutrition/context.js';
+import { parseAndLogMealWithAI } from '../nutrition/ai-parse.js';
+import { formatNowContext, normalizeTimezone } from '../../utils/timezone.js';
 import { env } from '../../config/env.js';
 import { fmtSleepHours, round } from '../../utils/format.js';
 import { getCredentials, saveIntegration } from '../integrations/base.js';
@@ -76,9 +79,12 @@ export function getOpenRouterStatus(userId: string) {
 
 export { estimateMealNutrition } from '../nutrition/meals.js';
 
-function buildSystemPrompt(userId: string): string {
+function buildSystemPrompt(userId: string, timeZone?: string): string {
   try {
-    const context = buildUnifiedContext(userId);
+    const tz = normalizeTimezone(timeZone);
+    const nowCtx = formatNowContext(tz);
+    const nutritionDetail = buildNutritionContextForAI(userId, tz);
+    const context = buildUnifiedContext(userId, tz);
     const targets = getEffectiveTargets(userId);
     const recs = generateRecommendations(userId);
     const memories = db.prepare(`SELECT category, key, value, source FROM memories WHERE user_id = ? ORDER BY source DESC, updated_at DESC`).all(userId) as { category: string; key: string; value: string; source: string }[];
@@ -104,12 +110,18 @@ function buildSystemPrompt(userId: string): string {
 
 CRITICAL: Every recommendation MUST consider ALL available data holistically. Never give advice based on a single metric alone.
 
+## Date & Time (user local)
+- Timezone: ${nowCtx.timezone}
+- Now: ${nowCtx.longDate} at ${nowCtx.localTime}
+- Today: ${nowCtx.localDate} (${nowCtx.weekday})
+- Yesterday: ${nowCtx.yesterday}
+
 ## Current Athlete State
 - Sport: ${context.profile?.sport ?? 'rugby'} | Goal: ${context.profile?.goal_type ?? 'maintenance'}
 - Weight: ${weight}kg (trend: ${context.weightTrend.trend}, weekly: ${round(context.weightTrend.weeklyChange, 2)}kg)
 - Recovery: ${latestRecovery?.recovery_score ?? 'N/A'}% | HRV: ${latestRecovery?.hrv_ms != null ? Math.round(latestRecovery.hrv_ms) : 'N/A'}ms | Strain: ${round(latestRecovery?.strain, 1) ?? 'N/A'}
 - Sleep: ${sleepDisplay} | Quality: ${latestSleep?.performance_pct != null ? Math.round(latestSleep.performance_pct) : 'N/A'}%
-- Today: ${Math.round(context.nutrition.today.calories)} cal, ${Math.round(context.nutrition.today.protein_g)}g protein
+- Today: ${Math.round(context.nutrition.today.calories)} cal, ${Math.round(context.nutrition.today.protein_g)}g protein (${context.nutrition.today.mealCount} meals)
 - Targets: ${targets.calories ?? 'unset'} cal, ${targets.protein ?? 'unset'}g protein
 - Academic Workload: ${context.academic.workloadScore}/100 | Stress: ${context.academic.stressEstimate}/100
 - Exam This Week: ${context.calendar.hasExamThisWeek ? 'YES' : 'No'} | Match Today: ${context.calendar.hasMatchToday ? 'YES' : 'No'}
@@ -119,6 +131,9 @@ ${Object.keys(context.scores).length > 0 ? `- Athletic Readiness: ${context.scor
 - Student Athlete: ${context.scores.student_athlete_score ?? 'N/A'}/100
 - Fatigue: ${context.scores.fatigue_score ?? 'N/A'}/100
 - Performance Potential: ${context.scores.performance_potential ?? 'N/A'}/100` : '- No scores computed yet — connect WHOOP or log data'}
+
+## Nutrition Log (full detail)
+${nutritionDetail}
 
 ## Recommendations
 ${recs.map(r => `- [${r.priority.toUpperCase()}] ${r.category}: ${r.message}`).join('\n')}
@@ -240,7 +255,8 @@ function generateFallbackResponse(systemPrompt: string, messages: { role: string
   return `I'm AiCoach with access to all your interconnected data.\n\n**Recommendations:**\n${recs.trim().split('\n').slice(0, 3).join('\n') || '- Start logging data for insights'}\n\n*Configure OpenRouter API key in Settings for full AI.*`;
 }
 
-export async function chat(userId: string, conversationId: string | null, userMessage: string) {
+export async function chat(userId: string, conversationId: string | null, userMessage: string, timeZone?: string) {
+  const tz = normalizeTimezone(timeZone);
   let convId = conversationId;
   if (!convId) {
     convId = generateId();
@@ -254,26 +270,30 @@ export async function chat(userId: string, conversationId: string | null, userMe
   learnFromChatMessage(userId, userMessage);
 
   // Auto-save meals and weight from chat
-  let mealLogged: ReturnType<typeof logMeal> | null = null;
+  let mealLogged: Record<string, unknown> | null = null;
   let weightLogged: { logged: boolean; weight_kg?: number } | null = null;
 
   if (isMealLogIntent(userMessage)) {
-    mealLogged = logMeal(userId, userMessage);
+    try {
+      mealLogged = await parseAndLogMealWithAI(userId, userMessage, { timeZone: tz });
+    } catch {
+      mealLogged = logMeal(userId, userMessage, { timeZone: tz });
+    }
   }
   if (isWeightLogIntent(userMessage)) {
-    weightLogged = logWeightFromChat(userId, userMessage);
+    weightLogged = logWeightFromChat(userId, userMessage, tz);
   }
 
   let mealsDeleted: { id: string; description: string; logged_at: string }[] = [];
   if (isMealDeleteIntent(userMessage)) {
-    mealsDeleted = deleteMealsFromChat(userId, userMessage).deleted;
+    mealsDeleted = deleteMealsFromChat(userId, userMessage, tz).deleted;
   }
 
   const history = db.prepare(`
     SELECT role, content FROM messages WHERE conversation_id = ? ORDER BY created_at ASC LIMIT 20
   `).all(convId) as { role: string; content: string }[];
 
-  const systemPrompt = buildSystemPrompt(userId);
+  const systemPrompt = buildSystemPrompt(userId, tz);
   const aiResult = await callOpenRouter(userId, systemPrompt, history);
 
   const metadata: Record<string, unknown> = {
@@ -294,10 +314,14 @@ export async function chat(userId: string, conversationId: string | null, userMe
 
   let responseText = aiResult.content;
   if (mealLogged && !responseText.toLowerCase().includes('logged') && !responseText.toLowerCase().includes('saved')) {
-    const dateStr = new Date(mealLogged.logged_at).toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+    const loggedAt = String(mealLogged.logged_at ?? '');
+    const dateStr = loggedAt.includes('T')
+      ? new Date(loggedAt.includes('Z') ? loggedAt : loggedAt + 'Z').toLocaleString(undefined, { weekday: 'short', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
+      : loggedAt;
     responseText += `\n\n✅ **Meal saved** (${dateStr})\n- ${mealLogged.calories} cal · ${mealLogged.protein_g}g protein · ${mealLogged.carbs_g}g carbs · ${mealLogged.fat_g}g fat`;
-    if (mealLogged.matchedFoods?.length) {
-      responseText += `\n- Detected: ${mealLogged.matchedFoods.join(', ')}`;
+    const matched = mealLogged.matchedFoods as string[] | undefined;
+    if (matched?.length) {
+      responseText += `\n- Detected: ${matched.join(', ')}`;
     }
   }
   if (weightLogged?.logged) {

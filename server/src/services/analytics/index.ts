@@ -1,5 +1,6 @@
 import { db } from '../../db/database.js';
 import { daysAgo, today, type MealTotals, type DailyScores, type UnifiedContext } from '../../types/index.js';
+import { todayInTz, daysAgoInTz, normalizeTimezone } from '../../utils/timezone.js';
 import { getEffectiveTargets, parseProfileRow } from './profile.js';
 import { fmtSleepHours, round, sanitizeRecoveryTrend } from '../../utils/format.js';
 
@@ -206,7 +207,8 @@ export function saveDailyScores(userId: string, date: string, scores: DailyScore
     scores.academic_stress, scores.school_life_balance, scores.hydration_score, scores.readiness_forecast);
 }
 
-export function buildUnifiedContext(userId: string): UnifiedContext {
+export function buildUnifiedContext(userId: string, timeZone?: string): UnifiedContext {
+  const tz = normalizeTimezone(timeZone);
   const profileRow = db.prepare(`SELECT * FROM user_profile WHERE user_id = ?`).get(userId) as Record<string, unknown> | undefined;
   const profile = parseProfileRow(profileRow) as UnifiedContext['profile'];
 
@@ -224,15 +226,15 @@ export function buildUnifiedContext(userId: string): UnifiedContext {
   `).all(userId) as UnifiedContext['workouts'];
   const strength = db.prepare(`SELECT * FROM strength_entries WHERE user_id = ? ORDER BY recorded_at DESC LIMIT 30`).all(userId) as UnifiedContext['strength'];
 
-  const t = today();
+  const t = todayInTz(tz);
   const nutrition = {
     today: getMealTotals(userId, t, t),
-    week: getMealTotals(userId, daysAgo(7), t),
-    month: getMealTotals(userId, daysAgo(30), t),
+    week: getMealTotals(userId, daysAgoInTz(7, tz), t),
+    month: getMealTotals(userId, daysAgoInTz(30, tz), t),
   };
 
   const academic = getAcademicWorkload(userId);
-  const lifestyle = db.prepare(`SELECT * FROM lifestyle_entries WHERE user_id = ? AND date >= ? ORDER BY date DESC LIMIT 14`).all(userId, daysAgo(14)) as UnifiedContext['lifestyle'];
+  const lifestyle = db.prepare(`SELECT * FROM lifestyle_entries WHERE user_id = ? AND date >= ? ORDER BY date DESC LIMIT 14`).all(userId, daysAgoInTz(14, tz)) as UnifiedContext['lifestyle'];
 
   const upcoming = db.prepare(`
     SELECT * FROM calendar_events WHERE user_id = ? AND start_time >= datetime('now') ORDER BY start_time LIMIT 10
@@ -293,14 +295,15 @@ export function buildUnifiedContext(userId: string): UnifiedContext {
   };
 }
 
-export function getNutritionAnalytics(userId: string, date?: string) {
+export function getNutritionAnalytics(userId: string, date?: string, timeZone?: string) {
+  const tz = normalizeTimezone(timeZone);
   const targets = getEffectiveTargets(userId);
   const weightKg = targets.weightKg;
-  const selectedDate = date || today();
+  const selectedDate = date || todayInTz(tz);
 
   const dayTotals = getMealTotals(userId, selectedDate, selectedDate);
-  const weekTotals = getMealTotals(userId, daysAgo(7), today());
-  const monthTotals = getMealTotals(userId, daysAgo(30), today());
+  const weekTotals = getMealTotals(userId, daysAgoInTz(7, tz), todayInTz(tz));
+  const monthTotals = getMealTotals(userId, daysAgoInTz(30, tz), todayInTz(tz));
 
   const daysInWeek = 7;
   const daysInMonth = 30;
@@ -309,6 +312,8 @@ export function getNutritionAnalytics(userId: string, date?: string) {
 
   return {
     date: selectedDate,
+    localToday: todayInTz(tz),
+    timezone: tz,
     today: dayTotals,
     week: weekTotals,
     month: monthTotals,

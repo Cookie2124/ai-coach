@@ -16,6 +16,7 @@ router.use(authMiddleware);
 
 router.get('/dashboard', async (req: AuthRequest, res) => {
   const userId = req.userId!;
+  const tz = req.timezone!;
 
   // WHOOP sync every app open + full background sync if stale
   syncWhoopOnAppOpen(userId).catch(err => console.warn('WHOOP open-sync:', err.message));
@@ -24,9 +25,9 @@ router.get('/dashboard', async (req: AuthRequest, res) => {
   runCorrelationEngine(userId);
   generateInsightsFromCorrelations(userId);
   const learning = runLearningCycle(userId);
-  const context = buildUnifiedContext(userId);
+  const context = buildUnifiedContext(userId, tz);
   const predictions = runAllPredictions(userId);
-  const nutritionAnalytics = getNutritionAnalytics(userId);
+  const nutritionAnalytics = getNutritionAnalytics(userId, undefined, tz);
   const dataAvailability = {
     hasRecovery: context.recovery.length > 0,
     hasSleep: context.sleep.length > 0,
@@ -35,7 +36,7 @@ router.get('/dashboard', async (req: AuthRequest, res) => {
     hasWeight: !!context.latestWeight,
     hasScores: Object.keys(context.scores).length > 0,
   };
-  const summary = getDashboardSummary(userId);
+  const summary = getDashboardSummary(userId, tz);
   const whoopIntegration = getIntegration(userId, 'whoop');
   const whoopConfig = whoopIntegration?.config ? JSON.parse(whoopIntegration.config) : {};
 
@@ -63,7 +64,7 @@ router.get('/dashboard', async (req: AuthRequest, res) => {
 
 router.get('/nutrition', (req: AuthRequest, res) => {
   const date = typeof req.query.date === 'string' ? req.query.date : undefined;
-  res.json(getNutritionAnalytics(req.userId!, date));
+  res.json(getNutritionAnalytics(req.userId!, date, req.timezone));
 });
 
 router.get('/recovery', (req: AuthRequest, res) => {

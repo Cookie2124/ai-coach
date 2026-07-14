@@ -31,7 +31,7 @@ router.post('/chat', async (req: AuthRequest, res) => {
   try {
     const { message, conversationId } = req.body;
     if (!message) return res.status(400).json({ error: 'Message required' });
-    const result = await chat(req.userId!, conversationId ?? null, message);
+    const result = await chat(req.userId!, conversationId ?? null, message, req.timezone);
     res.json(result);
   } catch (error) {
     res.status(500).json({ error: (error as Error).message });
