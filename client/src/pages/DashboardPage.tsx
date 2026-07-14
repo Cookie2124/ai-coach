@@ -9,6 +9,7 @@ import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, Legend } f
 import { api } from '../services/api';
 
 import { ScoreRing, StatCard, ProgressBar, InsightCard, LoadingSpinner } from '../components/ui';
+import WeightLogCard from '../components/WeightLogCard';
 
 import {
 
@@ -385,6 +386,10 @@ export default function DashboardPage() {
         />
 
       </div>
+
+
+
+      <WeightLogCard onLogged={load} />
 
 
 

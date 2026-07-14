@@ -5,6 +5,7 @@ import { authMiddleware, type AuthRequest } from '../middleware/auth.js';
 import { buildStudyPlan } from '../services/academic/planner.js';
 import { estimateMealNutrition, logMeal } from '../services/nutrition/meals.js';
 import { parseAndLogMealWithAI } from '../services/nutrition/ai-parse.js';
+import { logWeight, getWeightHistory } from '../services/body/weight.js';
 
 const router = Router();
 router.use(authMiddleware);
@@ -48,12 +49,25 @@ router.delete('/meals/:id', (req: AuthRequest, res) => {
 });
 
 // Weight
+router.get('/weight', (req: AuthRequest, res) => {
+  res.json(getWeightHistory(req.userId!));
+});
+
 router.post('/weight', (req: AuthRequest, res) => {
-  const { weight_kg, body_fat_pct, notes, recorded_at } = req.body;
-  const id = generateId();
-  db.prepare(`INSERT INTO weight_entries (id, user_id, weight_kg, body_fat_pct, notes, recorded_at) VALUES (?, ?, ?, ?, ?, ?)`)
-    .run(id, req.userId!, weight_kg, body_fat_pct, notes, recorded_at ?? new Date().toISOString());
-  res.json({ id, weight_kg });
+  try {
+    const { weight_kg, body_fat_pct, notes, recorded_at, date, time } = req.body;
+    const result = logWeight(req.userId!, Number(weight_kg), {
+      body_fat_pct,
+      notes,
+      recorded_at,
+      date,
+      time,
+      timeZone: req.timezone!,
+    });
+    res.json(result);
+  } catch (error) {
+    res.status(400).json({ error: (error as Error).message });
+  }
 });
 
 router.delete('/weight/:id', (req: AuthRequest, res) => {

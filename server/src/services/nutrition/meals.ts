@@ -1,6 +1,7 @@
 import { db } from '../../db/database.js';
 import { generateId } from '../../types/index.js';
 import { todayInTz, addDaysToLocalDate, normalizeTimezone } from '../../utils/timezone.js';
+import { logWeight as saveWeight } from '../body/weight.js';
 import {
   estimateMealNutrition,
   parseMealDate,
@@ -54,10 +55,12 @@ export function logWeightFromChat(userId: string, message: string, timeZone?: st
   const match = message.match(/(\d+(?:\.\d+)?)\s*kg/i);
   if (!match) return { logged: false };
   const weight_kg = parseFloat(match[1]);
-  const id = generateId();
-  db.prepare(`INSERT INTO weight_entries (id, user_id, weight_kg, notes, recorded_at) VALUES (?, ?, ?, 'Logged via AI Coach', ?)`)
-    .run(id, userId, weight_kg, parseMealDate(message, timeZone));
-  return { logged: true, weight_kg };
+  const result = saveWeight(userId, weight_kg, {
+    notes: 'Logged via AI Coach',
+    recorded_at: parseMealDate(message, timeZone),
+    timeZone,
+  });
+  return { logged: true, weight_kg: result.weight_kg };
 }
 
 export function isWeightLogIntent(message: string): boolean {

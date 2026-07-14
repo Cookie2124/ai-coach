@@ -63,8 +63,10 @@ export const api = {
     aiLogMeal: (data: { description: string; date?: string }) =>
       request<Record<string, unknown>>('/data/meals/ai-log', { method: 'POST', body: JSON.stringify(data) }),
     deleteMeal: (id: string) => request<{ success: boolean }>(`/data/meals/${id}`, { method: 'DELETE' }),
-    logWeight: (data: { weight_kg: number; notes?: string }) =>
-      request('/data/weight', { method: 'POST', body: JSON.stringify(data) }),
+    logWeight: (data: { weight_kg: number; notes?: string; recorded_at?: string; date?: string; time?: string; body_fat_pct?: number }) =>
+      request<{ id: string; weight_kg: number; recorded_at: string; notes?: string }>('/data/weight', { method: 'POST', body: JSON.stringify(data) }),
+    getWeights: () => request<{ id: string; weight_kg: number; notes?: string; recorded_at: string }[]>('/data/weight'),
+    deleteWeight: (id: string) => request<{ success: boolean }>(`/data/weight/${id}`, { method: 'DELETE' }),
     getWorkouts: () => request<unknown[]>('/data/workouts'),
     logWorkout: (data: Record<string, unknown>) =>
       request('/data/workouts', { method: 'POST', body: JSON.stringify(data) }),
